@@ -8,7 +8,9 @@ buildGoModule rec {
     root = ../.;
     fileset = lib.fileset.unions [ ../go.mod ../go.sum ../cmd ../internal ];
   };
-  vendorHash = "sha256-+PzGXatuTJxxA5IxRcvnDhb+xM+NMbmiW7f33mVEink=";
+  # Changes whenever the set of imported packages changes (go mod vendor copies only those);
+  # the version carries the git revision, so a stale cached vendor tree can't mask that.
+  vendorHash = "sha256-yhv8F7jqj1Kk66LTiuKm1QRBRngRF+xKdehyZiAs30k=";
   env.CGO_ENABLED = 0;
   ldflags = [ "-s" "-w" "-X main.version=${version}" "-X lcm/internal/agent.Version=${version}" ];
   # The tunnel/relay suites need -race (cgo) and real sockets; run them with `go test` instead.
