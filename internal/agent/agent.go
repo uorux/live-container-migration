@@ -280,8 +280,21 @@ func (a *Agent) handleInfo(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	info := map[string]any{"addresses": addrs, "version": Version, "memAvailable": memAvailable(), "stagingFree": stagingFree()}
+	if id := r.URL.Query().Get("container"); id != "" {
+		if !stage.ValidName(id) {
+			http.Error(w, "bad container id", http.StatusBadRequest)
+			return
+		}
+		anon, err := containerAnon(r.Context(), id)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		info["containerAnon"] = anon
+	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"addresses": addrs, "version": Version})
+	json.NewEncoder(w).Encode(info)
 }
 
 // requestBody undoes the sender's Content-Encoding (zstd from stagingClient; identity otherwise).

@@ -17,6 +17,7 @@ import (
 	"io"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -53,6 +54,9 @@ type Options struct {
 	// of the node's InternalIP, e.g. a LAN faster than the overlay the InternalIPs are on.
 	TransferNetwork string
 	LazyRestore     bool // experimental: CRIU lazy pages on the destination
+	// SkipMemoryCheck skips the pre-flight check that both nodes have the RAM for the staged
+	// images (see checkMemory).
+	SkipMemoryCheck bool
 	Log             func(format string, a ...any)
 }
 
@@ -111,6 +115,12 @@ func Migrate(ctx context.Context, kc kubernetes.Interface, o Options) (*Result, 
 	dstURL, err := agentURL(ctx, kc, o.TargetNode, o.AgentPort)
 	if err != nil {
 		return nil, err
+	}
+
+	if !o.SkipMemoryCheck {
+		if err := checkMemory(ctx, o.Token, srcURL, dstURL, ctrID, logf); err != nil {
+			return nil, err
+		}
 	}
 
 	res := &Result{MigrationID: time.Now().UTC().Format("20060102-150405") + "-" + rand.String(5),
@@ -321,8 +331,56 @@ func Recover(ctx context.Context, kc kubernetes.Interface, o Options, imagesNode
 	return res, nil
 }
 
-// restoredOK reports whether lcm-runc's last restore attempt for key succeeded. Call it after
-// fencing the key: the fence waits out a restore in flight, so the answer is final.
+type agentInfo struct {
+	Addresses     []string `json:"addresses"`
+	MemAvailable  int64    `json:"memAvailable"`
+	StagingFree   int64    `json:"stagingFree"`
+	ContainerAnon int64    `json:"containerAnon"`
+}
+
+const memHeadroom = 512 << 20
+
+// checkMemory refuses a migration the nodes can't hold in RAM: checkpoint images are staged on
+// tmpfs, outside Kubernetes' accounting. The source holds up to one full pre-dump before it is
+// shipped; the destination holds the images and, while restoring, the process itself (about
+// twice the workload's memory at peak). Agents too old to report memory are not checked.
+func checkMemory(ctx context.Context, token, srcURL, dstURL, ctrID string, logf func(string, ...any)) error {
+	get := func(base, q string) (*agentInfo, error) {
+		b, err := agentDo(ctx, base, token, http.MethodGet, "/v1/info"+q, nil)
+		if err != nil {
+			return nil, err
+		}
+		var i agentInfo
+		return &i, json.Unmarshal(b, &i)
+	}
+	src, err := get(srcURL, "?container="+url.QueryEscape(ctrID))
+	if err != nil || src.ContainerAnon <= 0 {
+		logf("warning: skipping the memory check (source agent: %v)", err)
+		return nil
+	}
+	dst, err := get(dstURL, "")
+	if err != nil || dst.MemAvailable <= 0 {
+		logf("warning: skipping the memory check (destination agent: %v)", err)
+		return nil
+	}
+	need := src.ContainerAnon
+	var problems []string
+	if src.MemAvailable > 0 && src.MemAvailable < need+memHeadroom {
+		problems = append(problems, fmt.Sprintf("the source node has %s available, needs ~%s for the first pre-dump", human(src.MemAvailable), human(need+memHeadroom)))
+	}
+	if dst.MemAvailable < 2*need+memHeadroom {
+		problems = append(problems, fmt.Sprintf("the destination node has %s available, needs ~%s (staged images + the restored process)", human(dst.MemAvailable), human(2*need+memHeadroom)))
+	}
+	if dst.StagingFree > 0 && dst.StagingFree < need+need/10 {
+		problems = append(problems, fmt.Sprintf("the destination's staging tmpfs has %s free, needs ~%s (services.lcm.stagingSize)", human(dst.StagingFree), human(need+need/10)))
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("not enough memory for a %s workload: %s (override with --skip-memory-check)", human(need), strings.Join(problems, "; "))
+	}
+	logf("memory check: workload %s; source %s available, destination %s available", human(need), human(src.MemAvailable), human(dst.MemAvailable))
+	return nil
+}
+
 // transferURL asks the agent at agentURL for its addresses and returns one inside cidr.
 func transferURL(ctx context.Context, agentURL, token, cidr string, port int) (string, error) {
 	pfx, err := netip.ParsePrefix(cidr)
@@ -347,6 +405,8 @@ func transferURL(ctx context.Context, agentURL, token, cidr string, port int) (s
 	return "", fmt.Errorf("agent has no address in %s (has %v)", cidr, info.Addresses)
 }
 
+// restoredOK reports whether lcm-runc's last restore attempt for key succeeded. Call it after
+// fencing the key: the fence waits out a restore in flight, so the answer is final.
 func restoredOK(ctx context.Context, url, token, key string) bool {
 	b, err := agentDo(ctx, url, token, http.MethodGet, "/v1/stage/"+key+"/result", nil)
 	if err != nil {
