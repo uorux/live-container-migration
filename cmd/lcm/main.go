@@ -1,6 +1,8 @@
 // lcm is the live-migration CLI.
 //
 //	lcm migrate <pod> --to <node> [-n namespace] [--container c] [--token-file f]
+//	lcm recover <template-pod> --to <node> --images-on <node> --key <ns_pod_container>
+//	    restore images left staged by a migration that failed after the source stopped
 package main
 
 import (
@@ -21,12 +23,14 @@ import (
 )
 
 func main() {
-	if len(os.Args) < 3 || os.Args[1] != "migrate" {
-		fmt.Fprintln(os.Stderr, "usage: lcm migrate <pod> --to <node> [flags]")
+	if len(os.Args) < 3 || (os.Args[1] != "migrate" && os.Args[1] != "recover") {
+		fmt.Fprintln(os.Stderr, "usage: lcm migrate <pod> --to <node> [flags]\n       lcm recover <template-pod> --to <node> --images-on <node> --key <key>")
 		os.Exit(2)
 	}
-	pod := os.Args[2]
-	fs := flag.NewFlagSet("migrate", flag.ExitOnError)
+	cmd, pod := os.Args[1], os.Args[2]
+	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
+	imagesOn := fs.String("images-on", "", "recover: node holding the staged images")
+	key := fs.String("key", "", "recover: staging key (namespace_pod_container)")
 	ns := fs.String("n", "default", "namespace")
 	to := fs.String("to", "", "target node (required)")
 	ctr := fs.String("container", "", "container to migrate (default: the only one)")
@@ -59,14 +63,24 @@ func main() {
 	defer stop()
 
 	start := time.Now()
-	res, err := controller.Migrate(ctx, kc, controller.Options{
+	opts := controller.Options{
 		Namespace: *ns, Pod: pod, Container: *ctr, TargetNode: *to,
 		Token: strings.TrimSpace(string(tok)), WaitImage: *waitImage, Relay: *relay,
 		PreDump: api.PreDumpPolicy{Max: *preMax, TargetBytes: *preTarget},
 		Log: func(f string, a ...any) {
 			fmt.Fprintf(os.Stderr, "%7.3fs "+f+"\n", append([]any{time.Since(start).Seconds()}, a...)...)
 		},
-	})
+	}
+	if cmd == "recover" {
+		res, err := controller.Recover(ctx, kc, opts, *imagesOn, *key)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "recover failed:", err)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "recovered: running on %s as %s\n", res.DestNode, res.DestPod)
+		return
+	}
+	res, err := controller.Migrate(ctx, kc, opts)
 	if *asJSON && res != nil {
 		json.NewEncoder(os.Stdout).Encode(res)
 	}

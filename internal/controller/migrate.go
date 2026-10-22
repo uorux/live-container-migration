@@ -150,24 +150,35 @@ func Migrate(ctx context.Context, kc kubernetes.Interface, o Options) (*Result, 
 			"/var/lib/lcm/ckpt/%s and can be restored there: %w", res.SourceNode, res.MigrationID, err)
 	}
 
-	// 3. Wait for the restored container.
-	if err := waitPod(ctx, kc, o.Namespace, res.DestPod, 2*time.Minute, func(p *corev1.Pod) (bool, error) {
-		for _, s := range p.Status.ContainerStatuses {
-			if s.Name != ctrName {
-				continue
-			}
-			if s.State.Running != nil {
-				return true, nil
-			}
-			if w := s.State.Waiting; w != nil && w.Reason != "" && w.Reason != "ContainerCreating" && w.Reason != "PodInitializing" {
-				return false, fmt.Errorf("restored container %s: %s: %s", ctrName, w.Reason, w.Message)
-			}
+	// 3. Wait for the restored container. If the restore fails, the source is already gone:
+	// roll back by restoring the same images in a new pod on the source node.
+	rolledBack := false
+	if err := waitRestored(ctx, kc, o.Namespace, res.DestPod, ctrName); err != nil {
+		logf("restore on %s failed: %v", o.TargetNode, err)
+		// kubelet retries failed containers on its own, and a retry may restore fine. Fence the
+		// destination pod so no further attempt can start, then make sure none already has:
+		// two live copies of one workload must never exist.
+		if _, ferr := agentDo(ctx, dstURL, o.Token, http.MethodPost, "/v1/fence/"+o.Namespace+"/"+res.DestPod, nil); ferr != nil {
+			return res, fmt.Errorf("restore failed and fencing the destination failed too (%v): %w", ferr, err)
 		}
-		return false, nil
-	}); err != nil {
-		return res, fmt.Errorf("restore on %s failed (source images kept on %s under /var/lib/lcm/ckpt/%s): %w",
-			o.TargetNode, res.SourceNode, res.MigrationID, err)
+		running, rerr := containerRunning(ctx, kc, o.Namespace, res.DestPod, ctrName)
+		if rerr != nil {
+			return res, fmt.Errorf("restore failed and destination state is unknown (%v): %w", rerr, err)
+		}
+		if running {
+			logf("a kubelet retry restored the container after all; keeping it")
+			agentDo(ctx, dstURL, o.Token, http.MethodDelete, "/v1/fence/"+o.Namespace+"/"+res.DestPod, nil)
+			goto restored
+		}
+		rb, rerr := rollback(ctx, kc, o, src, res, ctrName, key, srcURL, dstURL, logf)
+		if rerr != nil {
+			return res, fmt.Errorf("restore on %s failed (%v) and rollback failed: %w; images are still staged on %s under /var/lib/lcm/restore/%s",
+				o.TargetNode, err, rerr, o.TargetNode, key)
+		}
+		logf("rolled back: workload restored on %s as %s", rb.DestNode, rb.DestPod)
+		res.DestPod, res.DestNode, key, dstURL, rolledBack = rb.DestPod, rb.DestNode, rb.key, srcURL, true
 	}
+restored:
 	var rr api.RestoreResult
 	if b, err := agentDo(ctx, dstURL, o.Token, http.MethodGet, "/v1/stage/"+key+"/result", nil); err == nil {
 		if json.Unmarshal(b, &rr) == nil {
@@ -175,7 +186,7 @@ func Migrate(ctx context.Context, kc kubernetes.Interface, o Options) (*Result, 
 			res.Blackout = rr.Finished.Sub(ck.FreezeStart)
 		}
 	}
-	logf("restored on %s: restore %dms, relay resume %q, blackout %s", o.TargetNode, rr.RestoreMS, rr.RelayResume, res.Blackout.Round(time.Millisecond))
+	logf("restored on %s: restore %dms, relay resume %q, blackout %s", res.DestNode, rr.RestoreMS, rr.RelayResume, res.Blackout.Round(time.Millisecond))
 
 	// 4. Retire the source.
 	if err := pods.Delete(ctx, src.Name, metav1.DeleteOptions{GracePeriodSeconds: ptr(int64(0))}); err != nil && !apierrors.IsNotFound(err) {
@@ -194,7 +205,143 @@ func Migrate(ctx context.Context, kc kubernetes.Interface, o Options) (*Result, 
 			logf("warning: cleanup %s %s: %v", call.method, call.path, err)
 		}
 	}
+	if rolledBack {
+		return res, fmt.Errorf("restore on %s failed; rolled back, workload is running on %s as %s", o.TargetNode, res.DestNode, res.DestPod)
+	}
 	return res, nil
+}
+
+func deletePodAndWait(ctx context.Context, kc kubernetes.Interface, ns, name string) error {
+	pods := kc.CoreV1().Pods(ns)
+	if err := pods.Delete(ctx, name, metav1.DeleteOptions{GracePeriodSeconds: ptr(int64(0))}); err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	return wait.PollUntilContextTimeout(ctx, 250*time.Millisecond, 2*time.Minute, true, func(ctx context.Context) (bool, error) {
+		_, err := pods.Get(ctx, name, metav1.GetOptions{})
+		return apierrors.IsNotFound(err), nil
+	})
+}
+
+// Recover restores a workload whose migration failed after the source was stopped: the images
+// staged on imagesNode under key are restored into a new pod on targetNode, using templatePod
+// (normally the fenced source pod, which is deleted) as the spec.
+func Recover(ctx context.Context, kc kubernetes.Interface, o Options, imagesNode, key string) (*Result, error) {
+	logf := o.Log
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
+	if o.AgentPort == 0 {
+		o.AgentPort = api.DefaultPort
+	}
+	if o.WaitImage == "" {
+		o.WaitImage = defaultWaitIm
+	}
+	src, err := kc.CoreV1().Pods(o.Namespace).Get(ctx, o.Pod, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("template pod: %w", err)
+	}
+	ctr := o.Container
+	if ctr == "" {
+		ctr = src.Spec.Containers[0].Name
+	}
+	imgURL, err := agentURL(ctx, kc, imagesNode, o.AgentPort)
+	if err != nil {
+		return nil, err
+	}
+	tgtURL, err := agentURL(ctx, kc, o.TargetNode, o.AgentPort)
+	if err != nil {
+		return nil, err
+	}
+	res := &Result{MigrationID: "recover-" + rand.String(5), SourcePod: src.Name, SourceNode: o.TargetNode,
+		DestPod: strings.TrimSuffix(key, "_"+ctr)}
+	res.DestPod = strings.TrimPrefix(res.DestPod, o.Namespace+"_")
+	rb, err := rollback(ctx, kc, o, src, res, ctr, key, tgtURL, imgURL, logf)
+	if err != nil {
+		return res, err
+	}
+	agentDo(ctx, tgtURL, o.Token, http.MethodDelete, "/v1/fence/"+o.Namespace+"/"+src.Name, nil)
+	agentDo(ctx, tgtURL, o.Token, http.MethodDelete, "/v1/stage/"+rb.key, nil)
+	res.DestPod, res.DestNode = rb.DestPod, rb.DestNode
+	return res, nil
+}
+
+// containerRunning reports whether ctr in pod is running, after giving any in-flight container
+// creation time to settle (a fenced create is refused within milliseconds).
+func containerRunning(ctx context.Context, kc kubernetes.Interface, ns, pod, ctr string) (bool, error) {
+	time.Sleep(3 * time.Second)
+	p, err := kc.CoreV1().Pods(ns).Get(ctx, pod, metav1.GetOptions{})
+	if err != nil {
+		return false, err
+	}
+	for _, s := range p.Status.ContainerStatuses {
+		if s.Name == ctr && s.State.Running != nil {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func waitRestored(ctx context.Context, kc kubernetes.Interface, ns, pod, ctr string) error {
+	return waitPod(ctx, kc, ns, pod, 2*time.Minute, func(p *corev1.Pod) (bool, error) {
+		for _, s := range p.Status.ContainerStatuses {
+			if s.Name != ctr {
+				continue
+			}
+			if s.State.Running != nil {
+				return true, nil
+			}
+			if w := s.State.Waiting; w != nil && w.Reason != "" && w.Reason != "ContainerCreating" && w.Reason != "PodInitializing" {
+				return false, fmt.Errorf("restored container %s: %s: %s", ctr, w.Reason, w.Message)
+			}
+			if t := s.LastTerminationState.Terminated; t != nil {
+				return false, fmt.Errorf("restored container %s exited: %s (code %d)", ctr, t.Reason, t.ExitCode)
+			}
+		}
+		return false, nil
+	})
+}
+
+type rollbackResult struct{ DestPod, DestNode, key string }
+
+// rollback restores the images staged on the failed destination into a new pod on the source
+// node. The destination holds the only complete copy (the source freed shipped pre-dump pages).
+func rollback(ctx context.Context, kc kubernetes.Interface, o Options, src *corev1.Pod, res *Result, ctr, key, srcURL, dstURL string, logf func(string, ...any)) (*rollbackResult, error) {
+	pods := kc.CoreV1().Pods(o.Namespace)
+	// Both the failed destination and the (dead, fenced) source pod go first: the source still
+	// holds its resource requests on the node we are about to restore onto.
+	for _, name := range []string{res.DestPod, src.Name} {
+		if err := deletePodAndWait(ctx, kc, o.Namespace, name); err != nil {
+			return nil, err
+		}
+	}
+	agentDo(ctx, dstURL, o.Token, http.MethodDelete, "/v1/fence/"+o.Namespace+"/"+res.DestPod, nil)
+	rb := *res
+	rb.DestPod, rb.DestNode = nextName(res.DestPod), res.SourceNode
+	rbKey := stage.Key{Namespace: o.Namespace, Pod: rb.DestPod, Container: ctr}.String()
+	if _, err := pods.Create(ctx, destinationPod(src, &rb, o.WaitImage, rbKey, o.AgentPort), metav1.CreateOptions{}); err != nil {
+		return nil, fmt.Errorf("creating rollback pod: %w", err)
+	}
+	if err := waitPod(ctx, kc, o.Namespace, rb.DestPod, 3*time.Minute, func(p *corev1.Pod) (bool, error) {
+		for _, s := range p.Status.InitContainerStatuses {
+			if s.Name == WaitInitName && s.State.Running != nil {
+				return true, nil
+			}
+		}
+		return false, nil
+	}); err != nil {
+		return nil, fmt.Errorf("rollback pod never parked: %w", err)
+	}
+	body, _ := json.Marshal(map[string]string{"destURL": srcURL, "destKey": rbKey})
+	t0 := time.Now()
+	if _, err := agentDo(ctx, dstURL, o.Token, http.MethodPost, "/v1/stage/"+key+"/forward", bytes.NewReader(body)); err != nil {
+		return nil, fmt.Errorf("forwarding images back to %s: %w", res.SourceNode, err)
+	}
+	logf("images forwarded back to %s in %s", res.SourceNode, time.Since(t0).Round(time.Millisecond))
+	if err := waitRestored(ctx, kc, o.Namespace, rb.DestPod, ctr); err != nil {
+		return nil, err
+	}
+	agentDo(context.WithoutCancel(ctx), dstURL, o.Token, http.MethodDelete, "/v1/stage/"+key, nil)
+	return &rollbackResult{DestPod: rb.DestPod, DestNode: rb.DestNode, key: rbKey}, nil
 }
 
 func checkMigratable(p *corev1.Pod) error {

@@ -171,6 +171,12 @@ func restore(inv invocation, c createArgs, spec *ociSpec, key stage.Key) int {
 		return 1
 	}
 
+	// Fault injection for testing rollback: the next N restores on this node fail (N is the
+	// file's content, default 1).
+	if injectFailure() {
+		return fail(fmt.Errorf("injected failure (FAIL_NEXT_RESTORE)"))
+	}
+
 	rootfs := spec.Root.Path
 	if !filepath.IsAbs(rootfs) {
 		rootfs = filepath.Join(c.bundle, rootfs)
@@ -253,6 +259,22 @@ func restore(inv invocation, c createArgs, spec *ociSpec, key stage.Key) int {
 	os.Rename(stage.ReadyFile(key), stage.ReadyFile(key)+".consumed")
 	logf("restore %s (%s): ok rootfs=%dms restore=%dms", c.id, key, res.RootfsMS, res.RestoreMS)
 	return 0
+}
+
+func injectFailure() bool {
+	f := filepath.Join(stage.Root(), "FAIL_NEXT_RESTORE")
+	b, err := os.ReadFile(f)
+	if err != nil {
+		return false
+	}
+	n := 1
+	fmt.Sscan(strings.TrimSpace(string(b)), &n)
+	if n <= 1 {
+		os.Remove(f)
+	} else {
+		os.WriteFile(f, []byte(fmt.Sprint(n-1)), 0o644)
+	}
+	return true
 }
 
 func readPid(path string) int {

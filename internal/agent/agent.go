@@ -8,6 +8,8 @@
 //	PUT    /v1/stage/{key}/file/{name}    destination: body is written to {name}
 //	POST   /v1/stage/{key}/ready          destination: mark the staged restore complete
 //	DELETE /v1/stage/{key}                destination: drop a staged restore
+//	POST   /v1/stage/{key}/forward        ship a staged restore on to another agent (rollback:
+//	                                      the destination holds the only complete image set)
 //	GET    /v1/stage/{key}/wait           destination: long-poll until ready (used by the pod's init
 //	                                      container; unauthenticated, reveals only readiness)
 //	GET    /v1/stage/{key}/result         destination: lcm-runc's restore result, once there
@@ -60,6 +62,7 @@ func (a *Agent) Handler() http.Handler {
 	mux.HandleFunc("PUT /v1/stage/{key}/file/{name}", a.auth(a.handlePutFile))
 	mux.HandleFunc("POST /v1/stage/{key}/ready", a.auth(a.handleReady))
 	mux.HandleFunc("DELETE /v1/stage/{key}", a.auth(a.handleDeleteStage))
+	mux.HandleFunc("POST /v1/stage/{key}/forward", a.auth(a.handleForward))
 	mux.HandleFunc("GET /v1/stage/{key}/wait", a.handleWait)
 	mux.HandleFunc("GET /v1/stage/{key}/result", a.auth(a.handleResult))
 	mux.HandleFunc("DELETE /v1/ckpt/{id}", a.auth(a.handleDeleteCkpt))
@@ -212,6 +215,57 @@ func (a *Agent) handleDeleteStage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 500)
 		return
 	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type ForwardRequest struct {
+	DestURL string `json:"destURL"`
+	DestKey string `json:"destKey"`
+}
+
+// handleForward re-ships a staged restore (images, pre-dumps, rootfs diff, source addresses) to
+// another agent under a new key and marks it ready there.
+func (a *Agent) handleForward(w http.ResponseWriter, r *http.Request) {
+	dir, ok := a.stageKey(w, r)
+	if !ok {
+		return
+	}
+	var req ForwardRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.DestURL == "" || !validName(req.DestKey) {
+		http.Error(w, "destURL and destKey required", http.StatusBadRequest)
+		return
+	}
+	ctx := context.WithoutCancel(r.Context())
+	dst := &stagingClient{base: req.DestURL, key: req.DestKey, token: a.token}
+	if err := dst.reset(ctx); err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	for _, e := range entries {
+		name := e.Name()
+		switch {
+		case name == "work" || name == "result.json" || strings.HasPrefix(name, "READY"):
+			continue
+		case e.IsDir():
+			err = dst.putDir(ctx, filepath.Join(dir, name), name)
+		default:
+			err = dst.putFile(ctx, filepath.Join(dir, name), name)
+		}
+		if err != nil {
+			http.Error(w, fmt.Sprintf("forwarding %s: %v", name, err), http.StatusBadGateway)
+			return
+		}
+	}
+	if err := dst.ready(ctx); err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	a.log.Info("forwarded staged restore", "key", r.PathValue("key"), "to", req.DestURL, "as", req.DestKey)
 	w.WriteHeader(http.StatusNoContent)
 }
 
