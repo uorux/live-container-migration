@@ -6,7 +6,7 @@ buildGoModule rec {
     root = ../.;
     fileset = lib.fileset.unions [ ../go.mod ../go.sum ../cmd ../internal ];
   };
-  vendorHash = "sha256-hbUejF6hwT2QwAaNL8vj4QD3ENzn2ZKqIF7LNGvXjjc=";
+  vendorHash = "sha256-5HKiQF1jj6KeVcYc6zqYNIUz9Fe0u+MnTy3btGv3w5M=";
   env.CGO_ENABLED = 0;
   ldflags = [ "-s" "-w" "-X main.version=${version}" "-X lcm/internal/agent.Version=${version}" ];
   # The tunnel/relay suites need -race (cgo) and real sockets; run them with `go test` instead.

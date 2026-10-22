@@ -116,10 +116,14 @@ in
     #    them while frozen, so pre-copy rounds don't stall the workload.
     #  network-lock nftables: block the netns while dumping/restoring TCP via libnftables rather
     #    than shelling out to iptables-restore.
+    #  file-validation filesize: don't read every open file looking for an ELF build-id (on
+    #    CephFS each read is a round trip, cold ones stalled restores ~5 s per file); size checks
+    #    still catch a file that changed.
     environment.etc."criu/runc.conf".text = ''
       ghost-limit 64M
       pre-dump-mode read
       network-lock nftables
+      file-validation filesize
     '';
 
     # runc (spawned by containerd's shim, spawned by k3s) finds criu on k3s' PATH.
@@ -177,7 +181,8 @@ in
       after = [ "network-online.target" "var-lib-lcm-ckpt.mount" "var-lib-lcm-restore.mount" "lcm-token.service" ];
       wants = [ "network-online.target" ] ++ lib.optional cfg.deriveTokenFromK3s "lcm-token.service";
       requires = [ "var-lib-lcm-ckpt.mount" "var-lib-lcm-restore.mount" ];
-      path = [ cfg.criuPackage pkgs.iptables pkgs.nftables ];
+      # k3s for `k3s crictl pull` (pre-pulling a migrating pod's images on the destination).
+      path = [ cfg.criuPackage pkgs.iptables pkgs.nftables ] ++ lib.optional config.services.k3s.enable config.services.k3s.package;
       environment = {
         LCM_BIN_DIR = "${cfg.package}/bin";
       } // lib.optionalAttrs (cfg.logShipping.victoriaLogsUrl != null) {

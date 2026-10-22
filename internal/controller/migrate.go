@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/netip"
 	"regexp"
 	"strconv"
 	"strings"
@@ -48,7 +49,10 @@ type Options struct {
 	PreDump                               api.PreDumpPolicy
 	Relay                                 string
 	AllowManaged                          bool // migrate pods carrying GitOps labels (reconciliation suspended)
-	Log                                   func(format string, a ...any)
+	// TransferNetwork (CIDR): ship checkpoint data to an agent address in this network instead
+	// of the node's InternalIP, e.g. a LAN faster than the overlay the InternalIPs are on.
+	TransferNetwork string
+	Log             func(format string, a ...any)
 }
 
 type Result struct {
@@ -148,9 +152,32 @@ func Migrate(ctx context.Context, kc kubernetes.Interface, o Options) (*Result, 
 	}
 	logf("destination pod parked in %s after %s", WaitInitName, time.Since(t0).Round(time.Millisecond))
 
+	// Pull the pod's images on the destination now: kubelet would otherwise pull the main
+	// container's image only after the wait, inside the blackout.
+	var images []string
+	for _, c := range src.Spec.Containers {
+		images = append(images, c.Image)
+	}
+	t1 := time.Now()
+	body, _ := json.Marshal(map[string]any{"images": images})
+	if _, err := agentDo(ctx, dstURL, o.Token, http.MethodPost, "/v1/pull", bytes.NewReader(body)); err != nil {
+		logf("warning: pre-pulling images on %s: %v (kubelet will pull them during the blackout)", o.TargetNode, err)
+	} else {
+		logf("images present on %s after %s", o.TargetNode, time.Since(t1).Round(time.Millisecond))
+	}
+	shipURL := dstURL
+	if o.TransferNetwork != "" {
+		if u, err := transferURL(ctx, dstURL, o.Token, o.TransferNetwork, port(o)); err != nil {
+			logf("warning: no %s address on %s (%v); shipping over %s", o.TransferNetwork, o.TargetNode, err, dstURL)
+		} else {
+			shipURL = u
+			logf("shipping checkpoint data via %s", shipURL)
+		}
+	}
+
 	// 2. Checkpoint on the source, streamed progress.
 	req := api.CheckpointRequest{MigrationID: res.MigrationID, Namespace: o.Namespace, Pod: src.Name,
-		PodUID: string(src.UID), Container: ctrName, ContainerID: ctrID, DestKey: key, DestURL: dstURL, PreDump: o.PreDump, Relay: o.Relay}
+		PodUID: string(src.UID), Container: ctrName, ContainerID: ctrID, DestKey: key, DestURL: shipURL, PreDump: o.PreDump, Relay: o.Relay}
 	ck, err := runCheckpoint(ctx, srcURL, o.Token, req, logf)
 	res.Checkpoint = ck
 	if err != nil {
@@ -280,6 +307,30 @@ func Recover(ctx context.Context, kc kubernetes.Interface, o Options, imagesNode
 
 // restoredOK reports whether lcm-runc's last restore attempt for key succeeded. Call it after
 // fencing the key: the fence waits out a restore in flight, so the answer is final.
+// transferURL asks the agent at agentURL for its addresses and returns one inside cidr.
+func transferURL(ctx context.Context, agentURL, token, cidr string, port int) (string, error) {
+	pfx, err := netip.ParsePrefix(cidr)
+	if err != nil {
+		return "", err
+	}
+	b, err := agentDo(ctx, agentURL, token, http.MethodGet, "/v1/info", nil)
+	if err != nil {
+		return "", err
+	}
+	var info struct {
+		Addresses []string `json:"addresses"`
+	}
+	if err := json.Unmarshal(b, &info); err != nil {
+		return "", err
+	}
+	for _, a := range info.Addresses {
+		if ip, err := netip.ParseAddr(a); err == nil && pfx.Contains(ip) {
+			return fmt.Sprintf("http://%s", netip.AddrPortFrom(ip, uint16(port))), nil
+		}
+	}
+	return "", fmt.Errorf("agent has no address in %s (has %v)", cidr, info.Addresses)
+}
+
 func restoredOK(ctx context.Context, url, token, key string) bool {
 	b, err := agentDo(ctx, url, token, http.MethodGet, "/v1/stage/"+key+"/result", nil)
 	if err != nil {

@@ -13,12 +13,21 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/klauspost/compress/zstd"
 )
 
-// stagingClient ships image dirs from the source agent to the destination agent.
+// stagingClient ships image dirs from the source agent to the destination agent. Bodies are
+// zstd-compressed: page images compress 6-8x (measured on a Minecraft JVM) and node-to-node links
+// (WireGuard) are far slower than the compressor, so this is the biggest lever on both pre-copy
+// convergence and the final ship inside the blackout.
 type stagingClient struct {
 	base, key, token string
 }
+
+// compressConcurrency bounds the cores compression takes on the source, where the workload is
+// still running during pre-copy.
+const compressConcurrency = 4
 
 var shipClient = &http.Client{Transport: &http.Transport{
 	DialContext:         (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 15 * time.Second}).DialContext,
@@ -28,11 +37,18 @@ var shipClient = &http.Client{Transport: &http.Transport{
 }}
 
 func (c *stagingClient) do(ctx context.Context, method, path string, body io.Reader) error {
+	return c.doEnc(ctx, method, path, body, "")
+}
+
+func (c *stagingClient) doEnc(ctx context.Context, method, path string, body io.Reader, encoding string) error {
 	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(c.base, "/")+"/v1/stage/"+url.PathEscape(c.key)+path, body)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
+	if encoding != "" {
+		req.Header.Set("Content-Encoding", encoding)
+	}
 	resp, err := shipClient.Do(req)
 	if err != nil {
 		return err
@@ -52,27 +68,43 @@ func (c *stagingClient) ready(ctx context.Context) error {
 	return c.do(ctx, http.MethodPost, "/ready", nil)
 }
 
-// putDir streams dir as a tar (regular files, plus CRIU's relative `parent` symlink).
+// putDir streams dir as a zstd-compressed tar (regular files, plus CRIU's relative `parent`
+// symlink).
 func (c *stagingClient) putDir(ctx context.Context, dir, name string) error {
-	pr, pw := io.Pipe()
-	go func() {
-		bw := bufio.NewWriterSize(pw, 1<<20)
-		err := writeTar(bw, dir)
-		if err == nil {
-			err = bw.Flush()
-		}
-		pw.CloseWithError(err)
-	}()
-	return c.do(ctx, http.MethodPut, "/dir/"+url.PathEscape(name), pr)
+	return c.putStream(ctx, "/dir/"+url.PathEscape(name), func(w io.Writer) error { return writeTar(w, dir) })
 }
 
 func (c *stagingClient) putFile(ctx context.Context, path, name string) error {
-	f, err := os.Open(path)
-	if err != nil {
+	return c.putStream(ctx, "/file/"+url.PathEscape(name), func(w io.Writer) error {
+		f, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		_, err = io.Copy(w, f)
 		return err
-	}
-	defer f.Close()
-	return c.do(ctx, http.MethodPut, "/file/"+url.PathEscape(name), bufio.NewReaderSize(f, 1<<20))
+	})
+}
+
+func (c *stagingClient) putStream(ctx context.Context, path string, write func(io.Writer) error) error {
+	pr, pw := io.Pipe()
+	go func() {
+		zw, err := zstd.NewWriter(pw, zstd.WithEncoderLevel(zstd.SpeedDefault), zstd.WithEncoderConcurrency(compressConcurrency))
+		if err != nil {
+			pw.CloseWithError(err)
+			return
+		}
+		bw := bufio.NewWriterSize(zw, 1<<20)
+		err = write(bw)
+		if err == nil {
+			err = bw.Flush()
+		}
+		if cerr := zw.Close(); err == nil {
+			err = cerr
+		}
+		pw.CloseWithError(err)
+	}()
+	return c.doEnc(ctx, http.MethodPut, path, pr, "zstd")
 }
 
 func writeTar(w io.Writer, dir string) error {

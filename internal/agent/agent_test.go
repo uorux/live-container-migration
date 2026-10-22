@@ -3,6 +3,7 @@ package agent
 import (
 	"archive/tar"
 	"bytes"
+	"context"
 	"io"
 	"log/slog"
 	"net/http"
@@ -403,5 +404,33 @@ func TestWriteTarUntarRoundTrip(t *testing.T) {
 	}
 	if l, err := os.Readlink(filepath.Join(dst, "parent")); err != nil || l != "../pre-1" {
 		t.Errorf("parent -> %q (%v)", l, err)
+	}
+}
+
+func TestCompressedStagingRoundTrip(t *testing.T) {
+	srv, root := newTestServer(t)
+	src := t.TempDir()
+	pages := bytes.Repeat([]byte("jvm heap page "), 1<<16) // compressible, ~900 KiB
+	os.WriteFile(filepath.Join(src, "pages-1.img"), pages, 0o644)
+	os.WriteFile(filepath.Join(src, "inventory.img"), []byte("inv"), 0o644)
+	os.Symlink("../pre-1", filepath.Join(src, "parent"))
+	c := &stagingClient{base: srv.URL, key: "ns_pod-m1_c", token: testToken}
+	ctx := context.Background()
+	if err := c.putDir(ctx, src, "images"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.putFile(ctx, filepath.Join(src, "pages-1.img"), "rootfs-diff.tar"); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(root, "restore", "ns_pod-m1_c")
+	got, err := os.ReadFile(filepath.Join(dst, "images", "pages-1.img"))
+	if err != nil || !bytes.Equal(got, pages) {
+		t.Fatalf("pages mismatch (err %v, %d bytes)", err, len(got))
+	}
+	if l, _ := os.Readlink(filepath.Join(dst, "images", "parent")); l != "../pre-1" {
+		t.Errorf("parent link = %q", l)
+	}
+	if got, _ := os.ReadFile(filepath.Join(dst, "rootfs-diff.tar")); !bytes.Equal(got, pages) {
+		t.Errorf("file mismatch")
 	}
 }

@@ -22,6 +22,8 @@
 //	                                      can inject them from a stock image (no registry needed)
 //	POST   /v1/report                     lcm CLI: a finished migration's outcome (metrics + history)
 //	GET    /v1/migrations[?n=50]          migration history reported to this agent
+//	POST   /v1/pull                       pull images ({"images": [...]}) into containerd ahead of a restore
+//	GET    /v1/info                       this node's addresses (for picking a transfer network)
 //	GET    /metrics                       Prometheus metrics (unauthenticated)
 //	GET    /healthz
 package agent
@@ -36,12 +38,16 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/klauspost/compress/zstd"
 
 	"lcm/internal/api"
 	"lcm/internal/stage"
@@ -96,6 +102,8 @@ func (a *Agent) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "ok\n") })
 	mux.Handle("GET /metrics", a.tm.reg.Handler())
 	mux.HandleFunc("POST /v1/report", a.auth(a.handleReport))
+	mux.HandleFunc("POST /v1/pull", a.auth(a.handlePull))
+	mux.HandleFunc("GET /v1/info", a.auth(a.handleInfo))
 	mux.HandleFunc("GET /v1/migrations", a.auth(a.handleHistory))
 	mux.HandleFunc("POST /v1/checkpoint", a.auth(a.handleCheckpoint))
 	mux.HandleFunc("PUT /v1/stage/{key}/dir/{name}", a.auth(a.handlePutDir))
@@ -220,6 +228,67 @@ func (a *Agent) handleCheckpointStatus(w http.ResponseWriter, r *http.Request) {
 	w.Write(b)
 }
 
+// handlePull pre-pulls a migrating pod's images so kubelet doesn't pull them inside the blackout
+// (it pulls a container's image only when it starts that container, i.e. after the wait).
+func (a *Agent) handlePull(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Images []string `json:"images"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	var errs []string
+	for _, img := range req.Images {
+		if img == "" || strings.HasPrefix(img, "-") {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
+		t0 := time.Now()
+		out, err := exec.CommandContext(ctx, "k3s", "crictl", "pull", img).CombinedOutput()
+		cancel()
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v: %s", img, err, strings.TrimSpace(string(out))))
+			continue
+		}
+		a.log.Info("pre-pulled image", "image", img, "ms", time.Since(t0).Milliseconds())
+	}
+	if len(errs) > 0 {
+		http.Error(w, strings.Join(errs, "; "), http.StatusBadGateway)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *Agent) handleInfo(w http.ResponseWriter, r *http.Request) {
+	var addrs []string
+	if as, err := net.InterfaceAddrs(); err == nil {
+		for _, ad := range as {
+			if ipn, ok := ad.(*net.IPNet); ok && ipn.IP.IsGlobalUnicast() {
+				addrs = append(addrs, ipn.IP.String())
+			}
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"addresses": addrs, "version": Version})
+}
+
+// requestBody undoes the sender's Content-Encoding (zstd from stagingClient; identity otherwise).
+func requestBody(r *http.Request) (io.Reader, func(), error) {
+	switch r.Header.Get("Content-Encoding") {
+	case "", "identity":
+		return r.Body, func() {}, nil
+	case "zstd":
+		zr, err := zstd.NewReader(r.Body, zstd.WithDecoderConcurrency(4))
+		if err != nil {
+			return nil, nil, err
+		}
+		return zr, zr.Close, nil
+	default:
+		return nil, nil, fmt.Errorf("unsupported Content-Encoding %q", r.Header.Get("Content-Encoding"))
+	}
+}
+
 func validName(n string) bool {
 	return n != "" && n != "." && n != ".." && !strings.ContainsAny(n, "/\x00")
 }
@@ -236,7 +305,13 @@ func (a *Agent) handlePutDir(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	if err := untar(bufio.NewReaderSize(r.Body, 1<<20), target); err != nil {
+	body, closeBody, err := requestBody(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer closeBody()
+	if err := untar(bufio.NewReaderSize(body, 1<<20), target); err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}
@@ -254,9 +329,15 @@ func (a *Agent) handlePutFile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 500)
 		return
 	}
+	body, closeBody, err := requestBody(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer closeBody()
 	f, err := os.Create(filepath.Join(dir, name))
 	if err == nil {
-		_, err = io.Copy(f, r.Body)
+		_, err = io.Copy(f, body)
 		if cerr := f.Close(); err == nil {
 			err = cerr
 		}
