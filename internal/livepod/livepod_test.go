@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+	"time"
 
 	coordv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -88,5 +89,50 @@ func TestMigrationHoldBlocksCreation(t *testing.T) {
 	}
 	if n := podCount(t, kc); n != 0 {
 		t.Fatalf("held LivePod got a pod")
+	}
+}
+
+func podWithReady(name, from string, readyNow bool, since time.Time) *corev1.Pod {
+	st := corev1.ConditionFalse
+	if readyNow {
+		st = corev1.ConditionTrue
+	}
+	labels := map[string]string{Label: "fab"}
+	if from != "" {
+		labels[controller.LabelFrom] = from
+	}
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns", Labels: labels},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{
+			{Type: corev1.PodReady, Status: st, LastTransitionTime: metav1.NewTime(since)},
+		}},
+	}
+}
+
+func TestRetiresStaleSource(t *testing.T) {
+	old := time.Now().Add(-10 * time.Minute)
+	c, kc := setup(podWithReady("fab-a", "", false, old), podWithReady("fab-a-m1", "fab-a", true, old))
+	c.reconcileAll(context.Background())
+	if _, err := kc.CoreV1().Pods("ns").Get(context.Background(), "fab-a", metav1.GetOptions{}); err == nil {
+		t.Fatal("stale source not deleted")
+	}
+	if n := podCount(t, kc); n != 1 {
+		t.Fatalf("want only the successor left, got %d pods", n)
+	}
+}
+
+func TestKeepsSourceDuringMigration(t *testing.T) {
+	old := time.Now().Add(-10 * time.Minute)
+	for name, pods := range map[string][]runtime.Object{
+		// destination parked, source serving
+		"parked": {podWithReady("fab-a", "", true, old), podWithReady("fab-a-m1", "fab-a", false, old)},
+		// restore just finished; the CLI is about to delete the source
+		"fresh": {podWithReady("fab-a", "", false, time.Now()), podWithReady("fab-a-m1", "fab-a", true, time.Now())},
+	} {
+		c, kc := setup(pods...)
+		c.reconcileAll(context.Background())
+		if n := podCount(t, kc); n != 2 {
+			t.Fatalf("%s: source deleted too early (%d pods left)", name, n)
+		}
 	}
 }

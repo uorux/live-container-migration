@@ -83,19 +83,23 @@ func New(token, binDir string, log *slog.Logger) *Agent {
 // FollowRestores feeds lcm-runc's restore events into the metrics until ctx ends.
 func (a *Agent) FollowRestores(ctx context.Context) { a.tm.followRestores(ctx, a.log.Info) }
 
-// GC periodically removes fences older than maxAge (their pods are long gone; UIDs never repeat).
+// GC periodically removes fences older than maxAge (their pods are long gone; UIDs never repeat)
+// and reclaims staging that finished migrations left behind (see reclaimStaging).
 func (a *Agent) GC(ctx context.Context, maxAge time.Duration) {
-	for {
-		fences, _ := filepath.Glob(filepath.Join(stage.Root(), "fence", "*"))
-		for _, f := range fences {
-			if fi, err := os.Stat(f); err == nil && time.Since(fi.ModTime()) > maxAge {
-				os.Remove(f)
+	for i := 0; ; i++ {
+		if i%60 == 0 {
+			fences, _ := filepath.Glob(filepath.Join(stage.Root(), "fence", "*"))
+			for _, f := range fences {
+				if fi, err := os.Stat(f); err == nil && time.Since(fi.ModTime()) > maxAge {
+					os.Remove(f)
+				}
 			}
 		}
+		a.reclaimStaging()
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(time.Hour):
+		case <-time.After(time.Minute):
 		}
 	}
 }

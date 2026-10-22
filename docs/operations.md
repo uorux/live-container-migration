@@ -71,7 +71,7 @@ the metric HELP text for the exact list.
 | the source `lcm-agent` restarts | during/after the final dump | runc finishes the dump; the restarted agent ships it and marks the destination ready; the parked destination pod restores (tested in the lab with players connected: no disconnects) |
 | shipping fails | after the final dump | retried 4x; then the CLI reports where the images are (final dump on the source, pre-dumps on the destination) |
 | the restore fails on the destination | after shipping | the destination pod is fenced, the images are forwarded back, the workload is restored on the source node (~10-15 s freeze) |
-| the CLI dies / its connection drops | any time | nothing stops; re-run `lcm history`/`lcm status` to see the outcome; leftover destination pods carry the `lcm.rooty.dev/migration-id` annotation |
+| the CLI dies / its connection drops | any time | nothing stops; the agents reclaim RAM staging of migrations that completed; with a LivePod, the controller deletes the fenced source pod 2 min after its successor is Ready (otherwise delete it by hand); leftover destination pods carry the `lcm.rooty.dev/migration-id` annotation |
 
 ## How a migration hides its latency
 
@@ -118,8 +118,8 @@ Common CRIU errors:
 
 | Path | What | Lifetime |
 | --- | --- | --- |
-| `ckpt/<migration>/` (tmpfs) | source images during a migration | deleted on success/abort; kept after a post-stop failure |
-| `restore/<ns_pod_ctr>/` (tmpfs) | destination staging | deleted after success |
+| `ckpt/<migration>/` (tmpfs) | source images during a migration | deleted on success/abort; if the CLI died, the agent deletes it 10 min after shipping; kept after a post-stop failure |
+| `restore/<ns_pod_ctr>/` (tmpfs) | destination staging | deleted after success; if the CLI died, the agent drops the images 1 min after a successful restore |
 | `fence/<pod-uid>` | pods that must never start here again | GC after 14 days |
 | `consumed/<ns_pod_ctr>` | restore tombstones (a recreated sandbox cold-starts instead of waiting) | small, kept |
 | `logs/` | CRIU logs per migration | kept; prune by hand |

@@ -148,6 +148,7 @@ func (c *Controller) reconcile(ctx context.Context, lp *unstructured.Unstructure
 	if err != nil {
 		return err
 	}
+	c.retireStaleSources(ctx, pods.Items)
 	var current *corev1.Pod
 	for i := range pods.Items {
 		p := &pods.Items[i]
@@ -177,6 +178,50 @@ func (c *Controller) reconcile(ctx context.Context, lp *unstructured.Unstructure
 	}
 	c.Log.Info("livepod: created pod (no pod existed)", "namespace", ns, "livepod", name, "pod", created.Name)
 	return c.setStatus(ctx, lp, created.Name, "", "Created", 1)
+}
+
+// staleAfter is how long a migrated-away source may linger after its successor is ready before
+// the controller deletes it (normally the migration deletes it within seconds).
+const staleAfter = 2 * time.Minute
+
+// retireStaleSources deletes source pods a migration left behind (its CLI died before cleanup):
+// a pod whose successor (a pod labelled lcm.rooty.dev/migrated-from=<it>) is Ready, while it
+// itself has not been Ready for staleAfter. Its container is fenced and can never run again; it
+// only blocks `lcm migrate livepod/...` and holds resources.
+func (c *Controller) retireStaleSources(ctx context.Context, pods []corev1.Pod) {
+	byName := map[string]*corev1.Pod{}
+	for i := range pods {
+		byName[pods[i].Name] = &pods[i]
+	}
+	for i := range pods {
+		succ := &pods[i]
+		src := byName[succ.Labels[controller.LabelFrom]]
+		if src == nil || src.DeletionTimestamp != nil || !ready(succ) || ready(src) || time.Since(notReadySince(src)) < staleAfter {
+			continue
+		}
+		c.Log.Info("livepod: deleting a migrated-away source pod left behind", "namespace", src.Namespace, "pod", src.Name, "successor", succ.Name)
+		if err := c.Kube.CoreV1().Pods(src.Namespace).Delete(ctx, src.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			c.Log.Warn("livepod: deleting stale source", "pod", src.Name, "err", err)
+		}
+	}
+}
+
+func ready(p *corev1.Pod) bool {
+	for _, c := range p.Status.Conditions {
+		if c.Type == corev1.PodReady {
+			return c.Status == corev1.ConditionTrue
+		}
+	}
+	return false
+}
+
+func notReadySince(p *corev1.Pod) time.Time {
+	for _, c := range p.Status.Conditions {
+		if c.Type == corev1.PodReady && c.Status != corev1.ConditionTrue {
+			return c.LastTransitionTime.Time
+		}
+	}
+	return time.Now() // no Ready condition yet: treat as just changed
 }
 
 func podFromTemplate(lp *unstructured.Unstructured) (*corev1.Pod, error) {

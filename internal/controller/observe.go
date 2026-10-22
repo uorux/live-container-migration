@@ -163,12 +163,23 @@ func LivePodPod(ctx context.Context, kc kubernetes.Interface, ns, name string) (
 	}
 	var running []string
 	for _, p := range pods.Items {
-		if p.Status.Phase == corev1.PodRunning && p.DeletionTimestamp == nil {
+		// Ready, not just Running: a migrated-away source that wasn't cleaned up stays "Running"
+		// with its fenced container crash-looping.
+		if p.Status.Phase == corev1.PodRunning && p.DeletionTimestamp == nil && podReady(&p) {
 			running = append(running, p.Name)
 		}
 	}
 	if len(running) != 1 {
-		return "", fmt.Errorf("livepod %s/%s has %d running pods (%v); expected exactly 1", ns, name, len(running), running)
+		return "", fmt.Errorf("livepod %s/%s has %d ready pods (%v); expected exactly 1", ns, name, len(running), running)
 	}
 	return running[0], nil
+}
+
+func podReady(p *corev1.Pod) bool {
+	for _, c := range p.Status.Conditions {
+		if c.Type == corev1.PodReady {
+			return c.Status == corev1.ConditionTrue
+		}
+	}
+	return false
 }
