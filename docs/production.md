@@ -70,6 +70,14 @@ agent port to the pod CIDR and the listed interfaces), and node-to-node throughp
 6. Jacob joins with a real client and tries it.
 7. The real server.
 
+## Running the real server
+
+Use a LivePod (deploy/livepod-crd.yaml, example in deploy/examples/minecraft-livepod.yaml) so
+GitOps manages the definition while migrations move the pod; enable the controller with
+`services.lcm.livePods.enable = true` (it runs in lcm-agent, leader-elected). Migrate with
+`lcm migrate livepod/<name> -n <ns> --to <node>`. The controller recreates the pod only when none
+exists at all, so a node failure is recovered (cold start) without ever running two copies.
+
 ## Operating
 
 - Migrate: `lcm migrate <pod> -n <ns> --to <node> --token-file /run/secrets/lcm-token`

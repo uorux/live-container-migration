@@ -1,0 +1,49 @@
+# A Minecraft server managed the migration-friendly way: GitOps owns this LivePod (not a
+# StatefulSet/Deployment); lcm-agent's LivePod controller keeps exactly one pod running from the
+# template, and `lcm migrate livepod/survival -n games --to <node>` moves it live.
+#
+# Needs: services.lcm.livePods.enable on the nodes, deploy/livepod-crd.yaml, an lcm-gateway in
+# the namespace (see deploy/homelab/lcm-test/gateway.yaml) and its tunnel token Secret.
+apiVersion: lcm.rooty.dev/v1alpha1
+kind: LivePod
+metadata:
+  name: survival
+  namespace: games
+spec:
+  template:
+    metadata:
+      labels: {app: survival}
+    spec:
+      runtimeClassName: lcm
+      terminationGracePeriodSeconds: 120   # lets the server save on a real stop
+      initContainers:
+      - name: fetch-relay
+        image: busybox:1.37
+        command: ["sh", "-c", "wget -q -O /lcm/lcm-relay http://$HOST_IP:7790/v1/bin/lcm-relay && chmod +x /lcm/lcm-relay"]
+        env: [{name: HOST_IP, valueFrom: {fieldRef: {fieldPath: status.hostIP}}}]
+        volumeMounts: [{name: lcm-bin, mountPath: /lcm}]
+      containers:
+      - name: mc
+        image: itzg/minecraft-server:java21
+        # Modded/vanilla: -proxy-protocol=false. Paper with proxies.proxy-protocol=true: drop it to
+        # keep real client IPs.
+        command: ["/lcm/lcm-relay", "run", "-gateway", "lcm-gateway-tunnel.games.svc.cluster.local:7000",
+                  "-token-file", "/secret/token", "-proxy-protocol=false", "-minecraft-ready", "--", "/start"]
+        env:
+        - {name: EULA, value: "TRUE"}
+        - {name: TYPE, value: FABRIC}          # or PAPER / NEOFORGE / FORGE
+        - {name: VERSION, value: "1.21.10"}
+        - {name: MEMORY, value: 6G}
+        # Deleted-but-open temp files must live on the container rootfs, not CephFS.
+        - {name: JVM_OPTS, value: "-Djna.tmpdir=/tmp -Djava.io.tmpdir=/tmp"}
+        resources:
+          requests: {cpu: "2", memory: 8Gi}
+          limits: {memory: 9Gi}
+        volumeMounts:
+        - {name: data, mountPath: /data}
+        - {name: lcm-bin, mountPath: /lcm}
+        - {name: secret, mountPath: /secret, readOnly: true}
+      volumes:
+      - {name: data, persistentVolumeClaim: {claimName: survival-data}}   # ceph-filesystem, RWX
+      - {name: lcm-bin, emptyDir: {}}
+      - {name: secret, secret: {secretName: lcm-tunnel}}
