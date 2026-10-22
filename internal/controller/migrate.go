@@ -117,6 +117,7 @@ func Migrate(ctx context.Context, kc kubernetes.Interface, o Options) (*Result, 
 		SourcePod: src.Name, SourceNode: src.Spec.NodeName, DestPod: nextName(src.Name), DestNode: o.TargetNode}
 	key := stage.Key{Namespace: o.Namespace, Pod: res.DestPod, Container: ctrName}.String()
 	logf("migration %s: %s/%s (%s) -> %s on %s", res.MigrationID, o.Namespace, src.Name, src.Spec.NodeName, res.DestPod, o.TargetNode)
+	defer holdLivePod(ctx, kc, src, res.MigrationID, logf)()
 
 	// 1. Destination pod, parked in its wait init container. Any leftover staging under this key
 	// (an earlier run that died before cleanup) goes first, or the wait would pass on stale images.
@@ -298,6 +299,7 @@ func Recover(ctx context.Context, kc kubernetes.Interface, o Options, imagesNode
 	}
 	res := &Result{MigrationID: "recover-" + rand.String(5), SourcePod: src.Name, SourceNode: o.TargetNode,
 		DestPod: strings.TrimSuffix(key, "_"+ctr)}
+	defer holdLivePod(ctx, kc, src, res.MigrationID, logf)()
 	res.DestPod = strings.TrimPrefix(res.DestPod, o.Namespace+"_")
 	rb, err := rollback(ctx, kc, o, src, res, ctr, key, tgtURL, imgURL, logf)
 	if err != nil {

@@ -26,10 +26,12 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/leaderelection"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
+
+	"lcm/internal/controller"
 )
 
 // Label put on every pod of a LivePod (migrations copy it to the destination pod).
-const Label = "lcm.rooty.dev/livepod"
+const Label = controller.LivePodLabel
 
 // PausedAnnotation on a LivePod ("true") stops the controller from creating pods for it.
 const PausedAnnotation = "lcm.rooty.dev/paused"
@@ -121,6 +123,11 @@ func (c *Controller) reconcile(ctx context.Context, lp *unstructured.Unstructure
 	}
 	if lp.GetAnnotations()[PausedAnnotation] == "true" {
 		return c.setStatus(ctx, lp, "", "", "Paused", 0)
+	}
+	// A migration's rollback deletes the dead source before creating the restore pod; it holds
+	// a Lease meanwhile so no cold copy is started next to the one being restored.
+	if held, err := controller.LivePodHeld(ctx, c.Kube, ns, name); held || err != nil {
+		return c.setStatus(ctx, lp, "", "", "Migrating", 0)
 	}
 	pod, err := podFromTemplate(lp)
 	if err != nil {
