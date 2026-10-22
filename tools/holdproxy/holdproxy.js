@@ -7,6 +7,9 @@
 //               the proxy swallows the answers.
 // Then it dials the backend, replays the buffered Handshake + Login Start, and splices.
 // Status requests (next state 1) are answered locally with a "starting" MOTD.
+// Proof of concept for docs/on-demand.md, not production code (query mode does not wait for the
+// last answer before splicing).
+// Usage: node holdproxy.js [listen=25600] [backend=127.0.0.1:25599] [mode=setcomp] [hold_s=120] [ka_s=10]
 'use strict';
 const net = require('net');
 const [,, LISTEN = '25600', BACKEND = '127.0.0.1:25599', MODE = 'setcomp', HOLD_S = '120', KA_S = '10'] = process.argv;
