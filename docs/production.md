@@ -27,7 +27,11 @@ not k3s; it evaluates and builds at nixos-dots' nixpkgs pin):
 - restart safety, staging GC, a memory pre-flight check, and the LivePod controller (off).
 
 Lab, link throttled to ~50 MB/s, 3 bots: Fabric 0.68-0.77 s blackouts (worst client gap
-0.79 s), NeoForge 0.71-0.96 s, a TCP smoke pod 0.56-0.76 s; 0 disconnects. Expect more on
+0.79 s), NeoForge 0.71-0.96 s, a TCP smoke pod 0.56-0.76 s; 0 disconnects. Soak: 20 consecutive
+Fabric hops with the bots connected, 20/20 succeeded, blackouts 0.65-0.94 s, worst gap 0.99 s,
+no staging left behind. Chaos drills (agent restarts on either side, a 15 s destination outage
+after the final dump, a CLI killed mid-migration, forced restore failures) all ended with the
+workload running exactly once. Expect more on
 production for big heaps: restores there copy memory at ~1.6 GB/s (the lab VMs do ~4.9 GB/s),
 so a 3.6 GB Paper heap restores in ~2.5 s. That's the VM layer (guest memory backing), not lcm;
 JVM transparent huge pages didn't help and made pre-dumps larger.
