@@ -1,7 +1,9 @@
-{ lib, buildGoModule }:
+{ lib, buildGoModule, rev ? "dev" }:
 buildGoModule rec {
   pname = "lcm";
-  version = "0.1.0";
+  # The git revision is part of the version: agents report it (lcm status, lcm_agent_build_info),
+  # which is how version skew between nodes is noticed (LcmAgentVersionSkew).
+  version = "0.1.0-${rev}";
   src = lib.fileset.toSource {
     root = ../.;
     fileset = lib.fileset.unions [ ../go.mod ../go.sum ../cmd ../internal ];
