@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -62,6 +63,9 @@ func (m *MinecraftConfig) defaults() {
 	}
 }
 
+// motd fills in {backend} (the server the player asked for).
+func motd(tmpl string, b *Backend) string { return strings.ReplaceAll(tmpl, "{backend}", b.Name) }
+
 // maxSniffPacket bounds the handshake and Login Start we buffer.
 const maxSniffPacket = 32 << 10
 
@@ -92,7 +96,7 @@ func (g *Gateway) handleMinecraft(c net.Conn, b *Backend) {
 			}
 			log.Debug("legacy ping answered locally")
 			c.SetWriteDeadline(time.Now().Add(mc.SniffTimeout))
-			if _, err := c.Write(mcproto.LegacyKick(127, mc.VersionName, mc.MOTD, 0, 0)); err == nil {
+			if _, err := c.Write(mcproto.LegacyKick(127, mc.VersionName, motd(mc.MOTD, b), 0, 0)); err == nil {
 				g.statusAnswered(b)
 			}
 			gracefulClose(c)
@@ -115,7 +119,8 @@ func (g *Gateway) handleMinecraft(c net.Conn, b *Backend) {
 		abortClose(c)
 		return
 	}
-	log = log.With("protocol", hs.Protocol, "host", mcproto.CleanHost(hs.Host))
+	b = g.Route(hs.Host)
+	log = log.With("protocol", hs.Protocol, "host", mcproto.CleanHost(hs.Host), "backend", b.Name)
 
 	if hs.Intent == mcproto.IntentStatus {
 		if b.Session.Connected() {
@@ -168,7 +173,7 @@ func (g *Gateway) answerStatus(c net.Conn, b *Backend, rd *mcproto.Reader, hs mc
 		}
 		switch {
 		case id == 0x00 && len(body) == 0:
-			doc := mcproto.NewStatus(mc.MOTD, mc.VersionName, hs.Protocol)
+			doc := mcproto.NewStatus(motd(mc.MOTD, b), mc.VersionName, hs.Protocol)
 			if _, err := c.Write(mcproto.StatusResponse(doc)); err != nil {
 				return
 			}

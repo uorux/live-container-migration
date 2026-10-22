@@ -29,7 +29,9 @@ func main() {
 	listen := flag.String("listen", cliutil.EnvDefault("LCM_LISTEN", ":25565"), "player listen address (env LCM_LISTEN)")
 	tunnelListen := flag.String("tunnel-listen", cliutil.EnvDefault("LCM_TUNNEL_LISTEN", ":7000"), "relay tunnel listen address (env LCM_TUNNEL_LISTEN)")
 	admin := flag.String("admin-listen", cliutil.EnvDefault("LCM_ADMIN_LISTEN", ""), "HTTP address for /status, /metrics and /healthz (empty = off; env LCM_ADMIN_LISTEN)")
-	backend := flag.String("backend", "default", "backend name relays must present")
+	backend := flag.String("backend", "default", "backend name relays must present; with several, where players go when no route matches")
+	backends := flag.String("backends", cliutil.EnvDefault("LCM_BACKENDS", ""), "more backends behind this gateway, comma-separated; -minecraft routes players by hostname: <backend>.<any domain>, or -route (env LCM_BACKENDS)")
+	routes := flag.String("route", cliutil.EnvDefault("LCM_ROUTES", ""), "explicit host=backend routes, comma-separated (env LCM_ROUTES)")
 	token := flag.String("token", "", "shared tunnel secret (prefer -token-file / LCM_TOKEN / LCM_TOKEN_FILE)")
 	tokenFile := flag.String("token-file", "", "file containing the shared tunnel secret")
 	window := cliutil.Size(1 << 20)
@@ -37,7 +39,7 @@ func main() {
 	ping := flag.Duration("ping-interval", 2*time.Second, "tunnel heartbeat interval")
 	dead := flag.Duration("dead-timeout", 10*time.Second, "declare the tunnel dead after this long without frames")
 	minecraft := flag.Bool("minecraft", envBool("LCM_MINECRAFT"), "Minecraft-aware first packets: answer status and hold logins while no relay is connected (env LCM_MINECRAFT=true)")
-	motd := flag.String("motd", cliutil.EnvDefault("LCM_MOTD", "Server is starting, please wait..."), "server list MOTD while the backend is down (-minecraft; env LCM_MOTD)")
+	motd := flag.String("motd", cliutil.EnvDefault("LCM_MOTD", "Server is starting, please wait..."), "server list MOTD while the backend is down; {backend} is replaced by its name (-minecraft; env LCM_MOTD)")
 	statusVersion := flag.String("status-version", "starting", "version name in the local status reply (-minecraft)")
 	holdInterval := flag.Duration("hold-interval", 10*time.Second, "keepalive interval for held logins; must stay well under the client's 30 s timeout (-minecraft)")
 	holdMax := flag.Duration("hold-max", 5*time.Minute, "kick a held login with -hold-message after this long (-minecraft)")
@@ -69,8 +71,33 @@ func main() {
 		}
 		trusted = append(trusted, p)
 	}
+	var extra []string
+	for _, b := range strings.Split(*backends, ",") {
+		if b = strings.TrimSpace(b); b != "" {
+			extra = append(extra, b)
+		}
+	}
+	routeMap := map[string]string{}
+	for _, r := range strings.Split(*routes, ",") {
+		if r = strings.TrimSpace(r); r == "" {
+			continue
+		}
+		host, be, ok := strings.Cut(r, "=")
+		if !ok {
+			fmt.Fprintln(os.Stderr, "lcm-gateway: -route wants host=backend, got", r)
+			os.Exit(2)
+		}
+		routeMap[strings.ToLower(strings.TrimSuffix(host, "."))] = be
+		extra = append(extra, be)
+	}
+	if len(extra) > 0 && !*minecraft {
+		fmt.Fprintln(os.Stderr, "lcm-gateway: routing to several backends needs -minecraft (it reads the handshake's hostname)")
+		os.Exit(2)
+	}
 	g := gateway.New(gateway.Config{
 		AcceptProxy: trusted,
+		Backends:    extra,
+		Routes:      routeMap,
 		Backend:     *backend,
 		Logger:      log,
 		Minecraft:   mc,

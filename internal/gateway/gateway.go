@@ -14,10 +14,12 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"lcm/internal/mcproto"
 	"lcm/internal/proxyproto"
 	"lcm/internal/tunnel"
 	"lcm/internal/wire"
@@ -26,9 +28,16 @@ import (
 // Config configures a Gateway.
 type Config struct {
 	Tunnel tunnel.Config
-	// Backend is the name relays must present in HELLO. One backend per
-	// gateway for now; the structure allows several (one player listener each).
+	// Backend is the name relays must present in HELLO, and where players go
+	// when no route matches.
 	Backend string
+	// Backends are further servers behind this gateway (Minecraft mode routes
+	// players to them by the hostname in their handshake; see Route).
+	Backends []string
+	// Routes maps a hostname (lower case, no trailing dot) to a backend.
+	// Hostnames without a route go to the backend named by their first DNS
+	// label if there is one (atm10.mc.example.com -> atm10), else to Backend.
+	Routes map[string]string
 	// Minecraft, if set, makes the player listener Minecraft-aware for the
 	// first packets of each connection (local status while the backend is
 	// down, login hold). Nil keeps the gateway pure L4.
@@ -82,7 +91,29 @@ func New(cfg Config) *Gateway {
 	g := &Gateway{cfg: cfg, log: cfg.Logger, backends: map[string]*Backend{}, started: time.Now()}
 	g.metrics = newGWMetrics(g, cfg.Version)
 	g.addBackend(cfg.Backend)
+	for _, name := range cfg.Backends {
+		if g.Backend(name) == nil {
+			g.addBackend(name)
+		}
+	}
 	return g
+}
+
+// Route picks the backend for a player who asked for host (as sent in the
+// handshake; Forge markers and a trailing dot are ignored).
+func (g *Gateway) Route(host string) *Backend {
+	host = strings.ToLower(mcproto.CleanHost(host))
+	if name, ok := g.cfg.Routes[host]; ok {
+		if b := g.Backend(name); b != nil {
+			return b
+		}
+	}
+	if label, _, ok := strings.Cut(host, "."); ok {
+		if b := g.Backend(label); b != nil {
+			return b
+		}
+	}
+	return g.DefaultBackend()
 }
 
 func (g *Gateway) addBackend(name string) {

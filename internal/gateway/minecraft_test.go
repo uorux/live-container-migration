@@ -412,3 +412,49 @@ func TestMinecraftOffIsPureL4(t *testing.T) {
 	}
 	p.expectSilence(3 * testInterval) // nothing injected while the relay is absent
 }
+
+// One gateway, two servers: players are routed by the hostname they connect to
+// (first label = backend name, explicit routes, default for the rest).
+func TestRouteByHostname(t *testing.T) {
+	gw := New(Config{Tunnel: testTunnelCfg(), Logger: testLogger(), Minecraft: &MinecraftConfig{HoldInterval: testInterval},
+		Backend: "lobby", Backends: []string{"atm10"}, Routes: map[string]string{"modded.example.org": "atm10"}})
+	pl, _ := Listen(context.Background(), "127.0.0.1:0")
+	tl, _ := Listen(context.Background(), "127.0.0.1:0")
+	go gw.ServePlayers(pl, gw.DefaultBackend())
+	go gw.ServeTunnel(tl)
+	defer pl.Close()
+	defer tl.Close()
+	e := &mcEnv{t: t, gw: gw, playerAddr: pl.Addr().String(), tunnelAddr: tl.Addr().String()}
+	servers := map[string]*mctest.Server{}
+	for _, name := range []string{"lobby", "atm10"} {
+		s := e.startServer(true)
+		servers[name] = s
+		r := relay.New(relay.Config{Gateway: e.tunnelAddr, Backend: name, Upstream: s.Addr(), ProxyProtocol: true,
+			Tunnel: testTunnelCfg(), BackoffMin: 20 * time.Millisecond, BackoffMax: 100 * time.Millisecond, Logger: testLogger()})
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() { r.Run(ctx); close(done) }()
+		defer func() { cancel(); <-done }()
+		e.waitFor("relay "+name, func() bool { return gw.Backend(name).Session.Connected() })
+	}
+	for host, want := range map[string]string{
+		"atm10.mc.example.com\x00FML3\x00": "atm10",
+		"ATM10.mc.example.com.":            "atm10",
+		"modded.example.org":               "atm10",
+		"mc.example.com":                   "lobby",
+		"nosuchpack.mc.example.com":        "lobby",
+	} {
+		p := e.dial()
+		p.c.Write(mcproto.AppendLoginStart(mcproto.AppendHandshake(nil, mcproto.Handshake{Protocol: 767, Host: host, Port: 25565, Intent: mcproto.IntentLogin}), "steve"))
+		select {
+		case l := <-servers[want].Logins:
+			if l.Handshake.Host != host {
+				t.Errorf("%q: server got host %q", host, l.Handshake.Host)
+			}
+			l.Conn.Close()
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%q: no login at %s", host, want)
+		}
+		p.c.Close()
+	}
+}
