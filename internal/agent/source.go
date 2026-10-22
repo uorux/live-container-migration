@@ -69,6 +69,9 @@ func (a *Agent) checkpoint(ctx context.Context, req api.CheckpointRequest, emit 
 		if err := dst.putDir(ctx, filepath.Join(dir, name), name); err != nil {
 			return nil, fmt.Errorf("shipping %s: %w", name, err)
 		}
+		// The destination has the pages now. Later dumps only consult this round's pagemaps (to
+		// skip pages that haven't changed), so free the page data: it's RAM on a tmpfs.
+		dropPages(filepath.Join(dir, name))
 		r := api.Round{DumpMS: dumpMS, ShipMS: since(t1), Bytes: size}
 		res.PreDumps = append(res.PreDumps, r)
 		emit(api.Event{Phase: "predump", Round: round, Bytes: size, Millis: r.DumpMS + r.ShipMS,
@@ -161,6 +164,13 @@ func keepLogs(dir, id string) {
 		}
 		os.MkdirAll(out, 0o755)
 		os.WriteFile(filepath.Join(out, filepath.Base(filepath.Dir(l))+"-"+filepath.Base(l)), b, 0o644)
+	}
+}
+
+func dropPages(dir string) {
+	pages, _ := filepath.Glob(filepath.Join(dir, "pages-*.img"))
+	for _, p := range pages {
+		os.Truncate(p, 0)
 	}
 }
 
