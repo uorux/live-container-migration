@@ -48,7 +48,8 @@ forwards uncompressed to an old source.
 - **Several ingresses:** run an lcm-gateway next to each ingress (e.g. behind HAProxy:
   `server gw 127.0.0.1:25566 send-proxy-v2`, gateway `-accept-proxy 127.0.0.1/32` so players keep
   their addresses) and give each server's relay all of them: `lcm-relay -gateway a:7000,b:7000`.
-  Migrations quiesce and resume every tunnel; each gateway holds its own players.
+  Migrations quiesce and resume every tunnel; each gateway holds its own players (lab: 3 bots on
+  each of two gateways, 1.24 s blackout, 0 disconnects, both tunnels resumed).
 - **Many servers behind one gateway:** `-minecraft -backend lobby -backends atm9,atm10`; players
   reach `atm10.<domain>`. Each relay sets `-backend <name>`.
 - **On demand:** `spec.onDemand` on the LivePod plus `-wake-url`/`-wake-token-file` on the

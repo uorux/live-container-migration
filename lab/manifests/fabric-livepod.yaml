@@ -20,7 +20,7 @@ spec:
         containers:
         - name: mc
           image: itzg/minecraft-server:java21
-          command: ["/lcm/lcm-relay", "run", "-gateway", "lcm-gateway-tunnel.default.svc.cluster.local:7000", "-token-file", "/secret/token", "-backend", "fab", "-minecraft-ready", "-proxy-protocol=false", "--", "/start"]
+          command: ["/lcm/lcm-relay", "run", "-gateway", "lcm-gateway-tunnel.default.svc.cluster.local:7000,lcm-gateway2-tunnel.default.svc.cluster.local:7000", "-token-file", "/secret/token", "-backend", "fab", "-minecraft-ready", "-proxy-protocol=false", "--", "/start"]
           env:
           - {name: EULA, value: "TRUE"}
           - {name: TYPE, value: FABRIC}

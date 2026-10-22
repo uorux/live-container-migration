@@ -1,0 +1,46 @@
+# A second gateway (stands in for a second ingress): the Fabric relay connects to both.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: lcm-gateway2, labels: {app: lcm-gateway2}}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: lcm-gateway2}}
+  template:
+    metadata: {labels: {app: lcm-gateway2}}
+    spec:
+      nodeSelector: {kubernetes.io/hostname: node3}
+      initContainers:
+      - name: fetch
+        image: busybox:1.37
+        command: ["sh", "-c", "wget -q -O /lcm/lcm-gateway http://$HOST_IP:7790/v1/bin/lcm-gateway && chmod +x /lcm/lcm-gateway"]
+        env: [{name: HOST_IP, valueFrom: {fieldRef: {fieldPath: status.hostIP}}}]
+        volumeMounts: [{name: bin, mountPath: /lcm}]
+      containers:
+      - name: gateway
+        image: busybox:1.37
+        # Minecraft mode: fab is the default backend (bots connect by IP), lobby.<anything> routes
+        # to "lobby"; an asleep on-demand LivePod is woken through the node's agent.
+        command: ["/lcm/lcm-gateway", "-listen", ":25565", "-tunnel-listen", ":7000", "-admin-listen", ":8080", "-token-file", "/secret/token",
+                  "-minecraft", "-backend", "fab", "-backends", "lobby", "-motd", "{backend} is starting, hang tight",
+                  "-wake-url", "http://$(HOST_IP):7790", "-wake-token-file", "/secret/wake"]
+        env: [{name: HOST_IP, valueFrom: {fieldRef: {fieldPath: status.hostIP}}}]
+        ports: [{containerPort: 25565, name: mc}, {containerPort: 7000, name: tunnel}, {containerPort: 8080, name: admin}]
+        readinessProbe: {httpGet: {path: /healthz, port: 8080}}
+        volumeMounts: [{name: bin, mountPath: /lcm}, {name: secret, mountPath: /secret, readOnly: true}]
+      volumes:
+      - {name: bin, emptyDir: {}}
+      - {name: secret, secret: {secretName: lcm-tunnel}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: lcm-gateway2}
+spec:
+  selector: {app: lcm-gateway2}
+  ports: [{name: mc, port: 25565, targetPort: mc}, {name: admin, port: 8080, targetPort: admin}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: lcm-gateway2-tunnel}
+spec:
+  selector: {app: lcm-gateway2}
+  ports: [{name: tunnel, port: 7000, targetPort: tunnel}]
