@@ -87,6 +87,17 @@ in
         roughly the workload's RSS on both ends while it runs.
       '';
     };
+    logShipping.victoriaLogsUrl = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      example = "http://10.0.0.11:30428";
+      description = ''
+        When set, lcm-agent ships its own structured logs and lcm-runc's log to this VictoriaLogs
+        base URL (jsonline ingest), with stream fields host and unit. Query e.g.
+        `host:arquitens unit:lcm-agent`. Best effort: a bounded queue; drops are exported as
+        lcm_logship_lines{state="dropped"}.
+      '';
+    };
     containerdConfigDir = mkOption {
       type = types.str;
       default = "/var/lib/rancher/k3s/agent/etc/containerd/config-v3.toml.d";
@@ -157,7 +168,11 @@ in
       wants = [ "network-online.target" ] ++ lib.optional cfg.deriveTokenFromK3s "lcm-token.service";
       requires = [ "var-lib-lcm-ckpt.mount" "var-lib-lcm-restore.mount" ];
       path = [ cfg.criuPackage pkgs.iptables pkgs.nftables ];
-      environment.LCM_BIN_DIR = "${cfg.package}/bin";
+      environment = {
+        LCM_BIN_DIR = "${cfg.package}/bin";
+      } // lib.optionalAttrs (cfg.logShipping.victoriaLogsUrl != null) {
+        LCM_VICTORIALOGS_URL = cfg.logShipping.victoriaLogsUrl;
+      };
       serviceConfig = {
         ExecStart = "${cfg.package}/bin/lcm-agent serve -listen ${cfg.listenAddress}:${toString cfg.port} -token-file ${cfg.tokenFile}";
         Restart = "always";

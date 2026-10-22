@@ -1,0 +1,76 @@
+# Live container migration alerts. Runbook: uorux/live-container-migration docs/operations.md.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: lcm-alerts
+  namespace: monitoring
+  labels: {release: prometheus}
+spec:
+  groups:
+  - name: lcm.rules
+    rules:
+    - alert: LcmMigrationFailed
+      expr: increase(lcm_migrations_total{outcome="failed"}[15m]) > 0
+      labels: {severity: critical}
+      annotations:
+        summary: "Live migration failed after the source stopped ({{ $labels.instance }})"
+        description: "A migration stopped its source but the workload was neither restored nor rolled back. The workload may be down. Run `lcm history` for the error and image location, and `lcm recover` to restore it."
+    - alert: LcmGatewayBackendDown
+      expr: lcm_gateway_tunnel_down_seconds > 180
+      labels: {severity: critical}
+      annotations:
+        summary: "lcm-gateway {{ $labels.namespace }}/{{ $labels.backend }} has had no server for {{ $value | humanizeDuration }}"
+        description: "No relay has connected to the gateway for over 3 minutes. Players are held or see 'starting'. Check the workload pod in {{ $labels.namespace }}."
+    - alert: LcmGatewayDown
+      expr: up{job=~".*lcm-gateway.*"} == 0
+      for: 5m
+      labels: {severity: critical}
+      annotations:
+        summary: "lcm-gateway {{ $labels.namespace }} is not being scraped"
+        description: "The gateway holds all player connections. If it is down, players are disconnected."
+    - alert: LcmAgentDown
+      expr: up{job="lcm-agent"} == 0
+      for: 5m
+      labels: {severity: warning}
+      annotations:
+        summary: "lcm-agent down on {{ $labels.instance }}"
+        description: "Migrations to or from this node will abort (safely, before the source stops). Check `systemctl status lcm-agent` on the node."
+    - alert: LcmMigrationRolledBack
+      expr: increase(lcm_migrations_total{outcome="rolled_back"}[15m]) > 0
+      labels: {severity: warning}
+      annotations:
+        summary: "A live migration was rolled back ({{ $labels.instance }})"
+        description: "The destination restore failed and the workload was restored on its source node. Clients saw roughly a 10-15 s freeze. See the destination's /var/lib/lcm/logs/*/restore.log."
+    - alert: LcmRestoreFailures
+      expr: increase(lcm_restores_total{result="failure"}[15m]) > 0
+      labels: {severity: warning}
+      annotations:
+        summary: "lcm-runc restore failures on {{ $labels.instance }}"
+        description: "Restore attempts failed on this node; see /var/lib/lcm/lcm-runc.log and the CRIU restore.log."
+    - alert: LcmBlackoutSlow
+      expr: (increase(lcm_migration_blackout_seconds_count[1h]) - increase(lcm_migration_blackout_seconds_bucket{le="12"}[1h])) > 0
+      labels: {severity: warning}
+      annotations:
+        summary: "A live migration froze its workload for more than 12 s"
+        description: "Clients time out at 30 s. Check lcm_checkpoint_phase_seconds (frozen, final_dump, final_ship) and lcm_restore_seconds to see which step grew."
+    - alert: LcmStagingNotCleaned
+      expr: lcm_staging_bytes > 0 and on(instance) lcm_agent_inflight_checkpoints == 0 and on(instance) lcm_staged_restores == 0
+      for: 30m
+      labels: {severity: warning}
+      annotations:
+        summary: "Checkpoint images left in RAM on {{ $labels.instance }} ({{ $value | humanize1024 }}B in {{ $labels.dir }})"
+        description: "A failed migration left images in /var/lib/lcm/{{ $labels.dir }}. If `lcm history` shows nothing that needs them, delete them."
+    - alert: LcmStagedRestoreStuck
+      expr: lcm_staged_restores > 0
+      for: 15m
+      labels: {severity: warning}
+      annotations:
+        summary: "A staged restore on {{ $labels.instance }} has not been consumed for 15 min"
+        description: "A destination pod never started its container, or the migration was abandoned. Check pods with the lcm.rooty.dev/migration-id annotation."
+    - alert: LcmAgentVersionSkew
+      expr: count(count by (version) (lcm_agent_build_info)) > 1
+      for: 30m
+      labels: {severity: warning}
+      annotations:
+        summary: "lcm-agent versions differ across nodes"
+        description: "Finish the rollout before migrating: a restore needs the same relay binary on every node."

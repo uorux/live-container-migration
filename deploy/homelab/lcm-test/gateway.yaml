@@ -39,7 +39,7 @@ spec:
 ---
 apiVersion: v1
 kind: Service
-metadata: {name: lcm-gateway-admin, namespace: lcm-test}
+metadata: {name: lcm-gateway-admin, namespace: lcm-test, labels: {app: lcm-gateway}}
 spec:
   selector: {app: lcm-gateway}
   ports: [{name: admin, port: 8080, targetPort: admin}]

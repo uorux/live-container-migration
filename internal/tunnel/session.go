@@ -51,6 +51,68 @@ type Config struct {
 	// HandshakeTimeout bounds CHALLENGE/HELLO/HELLO_ACK.
 	HandshakeTimeout time.Duration
 	Logger           *slog.Logger
+	// Observer, if set, is told about tunnel and stream events (gateway metrics).
+	Observer Observer
+}
+
+// Observer receives session events. Its methods are called with the session
+// lock held: they must be quick and must not call back into the session.
+type Observer interface {
+	// TunnelAttached is called after each successful handshake. resumed is
+	// false for a NEW session. outage is how long no working tunnel was
+	// attached before this one: since the previous detach, or, if this
+	// connection replaced one that was still attached, since that one last
+	// received a frame. It is 0 if no tunnel was ever attached.
+	TunnelAttached(resumed bool, outage time.Duration)
+	// StreamClosed is called once for every stream removed from the session.
+	StreamClosed(why CloseReason)
+}
+
+// CloseReason says why a stream was removed. "Local" is the player on the
+// gateway and the server's loopback connection on the relay.
+type CloseReason uint8
+
+const (
+	// CloseLocalFin: graceful close, the local side sent its FIN first.
+	CloseLocalFin CloseReason = iota
+	// ClosePeerFin: graceful close initiated by the peer, or the peer forgot
+	// the stream (closed it while the two sides were apart, FINAL GOAWAY).
+	ClosePeerFin
+	// CloseLocalError: the local socket failed (RST, read/write error).
+	CloseLocalError
+	// ClosePeerReset: the peer sent RESET.
+	ClosePeerReset
+	// CloseAborted: Stream.Reset was called; the caller knows why.
+	CloseAborted
+	// CloseSessionLost: the other side presented a different session
+	// (restarted), so streams it had seen are gone.
+	CloseSessionLost
+	// CloseProtocol: window overrun or inconsistent offsets on reconnect.
+	CloseProtocol
+	// CloseShutdown: CloseAll.
+	CloseShutdown
+)
+
+func (r CloseReason) String() string {
+	switch r {
+	case CloseLocalFin:
+		return "local_fin"
+	case ClosePeerFin:
+		return "peer_fin"
+	case CloseLocalError:
+		return "local_error"
+	case ClosePeerReset:
+		return "peer_reset"
+	case CloseAborted:
+		return "aborted"
+	case CloseSessionLost:
+		return "session_lost"
+	case CloseProtocol:
+		return "protocol"
+	case CloseShutdown:
+		return "shutdown"
+	}
+	return fmt.Sprintf("reason(%d)", uint8(r))
 }
 
 // Defaults fills unset fields.
@@ -107,6 +169,9 @@ type Stream struct {
 	rxFin        bool
 	finDelivered bool // CloseWrite applied to local
 	peerGone     bool // peer forgot or reset the stream: deliver what is queued, then close
+	goneReason   CloseReason
+	// localFinFirst: the local EOF was seen before the peer's CLOSE.
+	localFinFirst bool
 	// localErr is set when the local socket failed: bytes already read from it
 	// are still sent, followed by a RESET instead of a CLOSE.
 	localErr string
@@ -157,7 +222,8 @@ type Session struct {
 	// eventually calls AttachLocal or Reset.
 	onOpen func(*Stream)
 
-	stats Stats
+	stats   Stats
+	created time.Time
 }
 
 // Stats are counters for status reporting and tests.
@@ -165,12 +231,22 @@ type Stats struct {
 	Connected      bool
 	Streams        int
 	Connects       uint64 // successful handshakes
+	NewSessions    uint64 // handshakes that started a NEW session
+	Resumes        uint64 // handshakes that RESUMED the session
 	Disconnects    uint64
 	MaxTxBuffered  int // high-water mark of any stream's unacked send buffer
+	TxBuffered     int // bytes read from local sockets, not yet acknowledged by the peer (all streams, now)
+	RxQueued       int // bytes received from the peer, not yet written locally (all streams, now)
 	BytesFromLocal uint64
 	BytesToLocal   uint64
 	LastConnect    time.Time
 	LastDisconnect time.Time
+	// DownSince is when the tunnel went down (session creation if it was
+	// never up); zero while connected.
+	DownSince time.Time
+	// LastOutage is the length of the most recent outage that ended in a
+	// resume (see Observer.TunnelAttached).
+	LastOutage time.Duration
 }
 
 // NewSession creates a session. For the relay, id is the session id it will
@@ -186,6 +262,7 @@ func NewSession(role Role, cfg Config, id [wire.SessionIDLen]byte, onOpen func(*
 		nextID:     1,
 		onOpen:     onOpen,
 		peerWindow: uint64(cfg.Window),
+		created:    time.Now(),
 	}
 	return s
 }
@@ -204,6 +281,16 @@ func (s *Session) Stats() Stats {
 	st := s.stats
 	st.Connected = s.conn != nil
 	st.Streams = len(s.streams)
+	for _, x := range s.streams {
+		st.TxBuffered += x.tx.Len()
+		st.RxQueued += x.rx.Len()
+	}
+	if !st.Connected {
+		st.DownSince = s.stats.LastDisconnect
+		if st.DownSince.IsZero() {
+			st.DownSince = s.created
+		}
+	}
 	return st
 }
 
@@ -282,23 +369,29 @@ func (st *Stream) AttachLocal(local net.Conn) bool {
 	return true
 }
 
-// Reset aborts the stream and tells the peer.
-func (st *Stream) Reset(code uint8, msg string) {
+// Reset aborts the stream and tells the peer. It reports whether this call
+// closed the stream (false if it was already closed).
+func (st *Stream) Reset(code uint8, msg string) bool {
 	s := st.s
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !st.closed {
-		s.resetStream(st, code, msg)
+	if st.closed {
+		return false
 	}
+	s.resetStream(st, code, msg, CloseAborted)
+	return true
 }
 
 // ---- stream teardown (caller holds s.mu) ----
 
-func (s *Session) removeStream(st *Stream, abort bool) {
+func (s *Session) removeStream(st *Stream, abort bool, why CloseReason) {
 	if st.closed {
 		return
 	}
 	st.closed = true
+	if o := s.cfg.Observer; o != nil {
+		o.StreamClosed(why)
+	}
 	delete(s.streams, st.id)
 	if i, ok := slices.BinarySearch(s.order, st.id); ok {
 		s.order = slices.Delete(s.order, i, i+1)
@@ -308,7 +401,7 @@ func (s *Session) removeStream(st *Stream, abort bool) {
 	if l := st.local; l != nil {
 		go closeLocal(l, abort)
 	}
-	s.log.Debug("stream closed", "stream", st.id, "abort", abort,
+	s.log.Debug("stream closed", "stream", st.id, "abort", abort, "why", why.String(),
 		"tx", st.txEnd(), "rx", st.rxNext, "age", time.Since(st.created).Round(time.Millisecond))
 }
 
@@ -346,7 +439,7 @@ func closeLocal(c net.Conn, abort bool) {
 
 // resetStream aborts st locally and queues a RESET for the peer if the peer
 // knows the stream.
-func (s *Session) resetStream(st *Stream, code uint8, msg string) {
+func (s *Session) resetStream(st *Stream, code uint8, msg string, why CloseReason) {
 	if st.closed {
 		return
 	}
@@ -356,7 +449,7 @@ func (s *Session) resetStream(st *Stream, code uint8, msg string) {
 		s.kick()
 	}
 	s.log.Info("stream reset", "stream", st.id, "code", code, "reason", msg)
-	s.removeStream(st, true)
+	s.removeStream(st, true, why)
 }
 
 // failLocal handles a failed local socket (RST, write error): the socket is
@@ -367,7 +460,7 @@ func (s *Session) failLocal(st *Stream, msg string) {
 		return
 	}
 	if s.role == RoleGateway && (st.openPending || !st.everOpened) {
-		s.removeStream(st, true) // the relay does not know this stream
+		s.removeStream(st, true, CloseLocalError) // the relay does not know this stream
 		return
 	}
 	s.log.Info("local socket failed", "stream", st.id, "err", msg)
@@ -387,17 +480,26 @@ func (s *Session) peerForgot(st *Stream) {
 	if st.closed {
 		return
 	}
+	why := ClosePeerFin
+	if st.localErr != "" {
+		why = CloseLocalError
+	}
 	if st.rx.Len() == 0 || st.local == nil {
-		s.removeStream(st, false)
+		s.removeStream(st, false, why)
 		return
 	}
 	st.peerGone = true
+	st.goneReason = why
 	st.rxCond.Broadcast()
 }
 
 func (s *Session) maybeFinish(st *Stream) {
 	if !st.closed && st.txFin && st.finAcked && st.finDelivered && st.ackFinSent {
-		s.removeStream(st, false)
+		why := ClosePeerFin
+		if st.localFinFirst {
+			why = CloseLocalFin
+		}
+		s.removeStream(st, false, why)
 	}
 }
 
@@ -439,6 +541,7 @@ func (st *Stream) readPump() {
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				st.txFin = true
+				st.localFinFirst = !st.rxFin
 				s.kick()
 			} else {
 				s.failLocal(st, "local read: "+err.Error())
@@ -466,7 +569,7 @@ func (st *Stream) writePump() {
 		}
 		if st.rx.Len() == 0 {
 			if st.peerGone {
-				s.removeStream(st, false)
+				s.removeStream(st, false, st.goneReason)
 				s.mu.Unlock()
 				return
 			}
@@ -573,7 +676,7 @@ func (s *Session) handleFrame(c *Conn, f wire.Frame) error {
 		}
 		data = data[skip:]
 		if st.rx.Len()+len(data) > s.cfg.Window {
-			s.resetStream(st, wire.ResetProtocol, "peer exceeded window")
+			s.resetStream(st, wire.ResetProtocol, "peer exceeded window", CloseProtocol)
 			return nil
 		}
 		st.rx.Append(data)
@@ -624,9 +727,10 @@ func (s *Session) handleFrame(c *Conn, f wire.Frame) error {
 			s.log.Info("stream reset by peer", "stream", st.id, "code", code, "reason", msg)
 			if st.rx.Len() > 0 && st.local != nil && st.localErr == "" {
 				st.peerGone = true // deliver what we have first
+				st.goneReason = ClosePeerReset
 				st.rxCond.Broadcast()
 			} else {
-				s.removeStream(st, true)
+				s.removeStream(st, true, ClosePeerReset)
 			}
 		}
 	case wire.TOpen:
@@ -763,7 +867,7 @@ func (s *Session) collect(c *Conn, buf []byte) (out []byte, final bool) {
 	}
 	for _, st := range reset {
 		st.closed = false
-		s.removeStream(st, true)
+		s.removeStream(st, true, CloseLocalError)
 	}
 
 	if c.goaway != nil && !c.goawaySent {
@@ -813,6 +917,7 @@ func (s *Session) relayView() []wire.StreamState {
 func (s *Session) gatewayAccept(c *Conn, h *wire.Hello) wire.HelloAck {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	outage := s.outageLocked()
 	if old := s.conn; old != nil {
 		s.conn = nil
 		old.fail(errReplaced)
@@ -824,7 +929,7 @@ func (s *Session) gatewayAccept(c *Conn, h *wire.Hello) wire.HelloAck {
 		reset := 0
 		for _, id := range slices.Clone(s.order) {
 			if st := s.streams[id]; st.everOpened {
-				s.removeStream(st, true)
+				s.removeStream(st, true, CloseSessionLost)
 				reset++
 			}
 		}
@@ -847,7 +952,7 @@ func (s *Session) gatewayAccept(c *Conn, h *wire.Hello) wire.HelloAck {
 		if status == wire.AckNew || id > h.MaxSeen || !st.everOpened {
 			// The relay never processed this stream's OPEN.
 			if st.txBase != 0 || st.rxNext != 0 {
-				s.removeStream(st, true)
+				s.removeStream(st, true, CloseProtocol)
 				continue
 			}
 			st.openPending = true
@@ -863,7 +968,7 @@ func (s *Session) gatewayAccept(c *Conn, h *wire.Hello) wire.HelloAck {
 		if e.RxOffset < st.txBase || e.RxOffset > st.txEnd() {
 			s.log.Warn("stream offsets inconsistent; resetting", "stream", id,
 				"peer_rx", e.RxOffset, "tx_base", st.txBase, "tx_end", st.txEnd())
-			s.removeStream(st, true) // omitted from entries -> relay resets too
+			s.removeStream(st, true, CloseProtocol) // omitted from entries -> relay resets too
 			continue
 		}
 		st.openPending = false
@@ -875,7 +980,7 @@ func (s *Session) gatewayAccept(c *Conn, h *wire.Hello) wire.HelloAck {
 		}
 		entries = append(entries, wire.StreamState{ID: id, RxOffset: st.rxNext, Flags: fl})
 	}
-	s.attachLocked(c)
+	s.attachLocked(c, status == wire.AckResumed, outage)
 	return wire.HelloAck{Status: status, Window: uint32(s.cfg.Window), Streams: entries}
 }
 
@@ -883,16 +988,17 @@ func (s *Session) gatewayAccept(c *Conn, h *wire.Hello) wire.HelloAck {
 func (s *Session) relayApply(c *Conn, a *wire.HelloAck) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	outage := s.outageLocked()
 	s.peerWindow = uint64(a.Window)
 	if a.Status == wire.AckNew {
 		if len(s.streams) > 0 || s.maxSeen > 0 {
 			s.log.Warn("gateway does not know this session; dropping all streams", "streams", len(s.streams))
 		}
 		for _, id := range slices.Clone(s.order) {
-			s.removeStream(s.streams[id], true)
+			s.removeStream(s.streams[id], true, CloseSessionLost)
 		}
 		s.maxSeen = 0
-		s.attachLocked(c)
+		s.attachLocked(c, false, outage)
 		return
 	}
 	known := make(map[uint32]wire.StreamState, len(a.Streams))
@@ -907,30 +1013,52 @@ func (s *Session) relayApply(c *Conn, a *wire.HelloAck) {
 		st := s.streams[id]
 		e, ok := known[id]
 		if !ok {
-			s.removeStream(st, true) // gateway no longer has the player
+			s.removeStream(st, true, ClosePeerFin) // gateway no longer has the player
 			continue
 		}
 		if e.RxOffset < st.txBase || e.RxOffset > st.txEnd() {
 			s.log.Warn("stream offsets inconsistent; resetting", "stream", id,
 				"peer_rx", e.RxOffset, "tx_base", st.txBase, "tx_end", st.txEnd())
 			c.ctrl = wire.AppendFrame(c.ctrl, wire.TReset, id, wire.ResetPayload(wire.ResetProtocol, "offset mismatch"))
-			s.removeStream(st, true)
+			s.removeStream(st, true, CloseProtocol)
 			continue
 		}
 		st.txNext = e.RxOffset
 		st.finSent = e.Flags&wire.EntryFin != 0
 		st.ackDirty = true
 	}
-	s.attachLocked(c)
+	s.attachLocked(c, true, outage)
 }
 
-func (s *Session) attachLocked(c *Conn) {
+// outageLocked measures the outage a new connection ends (see
+// Observer.TunnelAttached). Caller holds s.mu.
+func (s *Session) outageLocked() time.Duration {
+	if old := s.conn; old != nil {
+		return time.Since(time.Unix(0, old.lastRecv.Load()))
+	}
+	if !s.stats.LastDisconnect.IsZero() {
+		return time.Since(s.stats.LastDisconnect)
+	}
+	return 0
+}
+
+func (s *Session) attachLocked(c *Conn, resumed bool, outage time.Duration) {
 	s.conn = c
 	s.ackFlush = true
 	s.stats.Connects++
+	if resumed {
+		s.stats.Resumes++
+		s.stats.LastOutage = outage
+	} else {
+		s.stats.NewSessions++
+	}
+	if o := s.cfg.Observer; o != nil {
+		o.TunnelAttached(resumed, outage)
+	}
 	s.stats.LastConnect = time.Now()
 	s.kick()
-	s.log.Info("tunnel up", "session", fmt.Sprintf("%x", s.id), "streams", len(s.streams))
+	s.log.Info("tunnel up", "session", fmt.Sprintf("%x", s.id), "streams", len(s.streams),
+		"resumed", resumed, "outage", outage.Round(time.Millisecond))
 }
 
 // CloseAll aborts every stream (used on shutdown).
@@ -938,7 +1066,7 @@ func (s *Session) CloseAll() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, id := range slices.Clone(s.order) {
-		s.removeStream(s.streams[id], false)
+		s.removeStream(s.streams[id], false, CloseShutdown)
 	}
 }
 

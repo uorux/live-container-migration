@@ -1,0 +1,21 @@
+# Scrape lcm-agent (NixOS service, :7790/metrics) on every k3s node's InternalIP.
+# Pattern: apps/infra/monitoring/etcd-scrape.yaml.
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMNodeScrape
+metadata:
+  name: lcm-agent
+  namespace: monitoring
+spec:
+  path: /metrics
+  interval: 30s
+  scheme: http
+  jobLabel: ""
+  relabelConfigs:
+  - sourceLabels: [__meta_kubernetes_node_address_InternalIP]
+    regex: (.+)
+    targetLabel: __address__
+    replacement: ${1}:7790
+  - sourceLabels: [__meta_kubernetes_node_name]
+    targetLabel: instance
+  - targetLabel: job
+    replacement: lcm-agent

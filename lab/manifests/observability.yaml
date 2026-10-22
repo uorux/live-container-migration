@@ -1,0 +1,71 @@
+# Lab stand-ins for the homelab's VictoriaMetrics/VictoriaLogs, to exercise metrics, rules and
+# log shipping. Not for production.
+apiVersion: v1
+kind: Namespace
+metadata: {name: obs}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: vm-scrape, namespace: obs}
+data:
+  scrape.yaml: |
+    global: {scrape_interval: 10s}
+    scrape_configs:
+    - job_name: lcm-agent
+      static_configs:
+      - targets: ["192.168.100.11:7790", "192.168.100.12:7790", "192.168.100.13:7790"]
+      relabel_configs:
+      - {source_labels: [__address__], regex: "192.168.100.1([0-9]):7790", target_label: instance, replacement: "node$1"}
+    - job_name: lcm-gateway
+      static_configs:
+      - targets: ["lcm-gateway.default.svc:8080"]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: vmsingle, namespace: obs}
+spec:
+  selector: {matchLabels: {app: vmsingle}}
+  template:
+    metadata: {labels: {app: vmsingle}}
+    spec:
+      nodeSelector: {kubernetes.io/hostname: node1}
+      containers:
+      - name: vm
+        image: victoriametrics/victoria-metrics:v1.128.0
+        args: ["-promscrape.config=/cfg/scrape.yaml", "-retentionPeriod=7d", "-httpListenAddr=:8428"]
+        ports: [{containerPort: 8428}]
+        resources: {limits: {memory: 512Mi}}
+        volumeMounts: [{name: cfg, mountPath: /cfg}]
+      volumes: [{name: cfg, configMap: {name: vm-scrape}}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: vmsingle, namespace: obs}
+spec:
+  type: NodePort
+  selector: {app: vmsingle}
+  ports: [{port: 8428, nodePort: 30842}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: vlogs, namespace: obs}
+spec:
+  selector: {matchLabels: {app: vlogs}}
+  template:
+    metadata: {labels: {app: vlogs}}
+    spec:
+      nodeSelector: {kubernetes.io/hostname: node1}
+      containers:
+      - name: vl
+        image: victoriametrics/victoria-logs:v1.38.0
+        args: ["-retentionPeriod=7d", "-httpListenAddr=:9428"]
+        ports: [{containerPort: 9428}]
+        resources: {limits: {memory: 512Mi}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: vlogs, namespace: obs}
+spec:
+  type: NodePort
+  selector: {app: vlogs}
+  ports: [{port: 9428, nodePort: 30428}]

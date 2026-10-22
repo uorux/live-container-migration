@@ -31,6 +31,8 @@ type Config struct {
 	// down, login hold). Nil keeps the gateway pure L4.
 	Minecraft *MinecraftConfig
 	Logger    *slog.Logger
+	// Version is reported by lcm_gateway_build_info and /status ("dev" if empty).
+	Version string
 }
 
 // Backend is one Minecraft server reachable through a relay session.
@@ -38,6 +40,8 @@ type Backend struct {
 	Name    string
 	Session *tunnel.Session
 	held    atomic.Int64 // login streams currently held (Minecraft mode)
+	// statusAnswered counts status pings the gateway answered itself.
+	statusAnswered atomic.Uint64
 }
 
 // Gateway serves player and tunnel listeners.
@@ -47,6 +51,7 @@ type Gateway struct {
 	mu       sync.Mutex
 	backends map[string]*Backend
 	started  time.Time
+	metrics  *gwMetrics
 }
 
 // New creates a gateway with a single backend.
@@ -64,12 +69,25 @@ func New(cfg Config) *Gateway {
 		mc.defaults()
 		cfg.Minecraft = &mc
 	}
-	g := &Gateway{cfg: cfg, log: cfg.Logger, backends: map[string]*Backend{}, started: time.Now()}
-	g.backends[cfg.Backend] = &Backend{
-		Name:    cfg.Backend,
-		Session: tunnel.NewSession(tunnel.RoleGateway, cfg.Tunnel, [wire.SessionIDLen]byte{}, nil),
+	if cfg.Version == "" {
+		cfg.Version = "dev"
 	}
+	g := &Gateway{cfg: cfg, log: cfg.Logger, backends: map[string]*Backend{}, started: time.Now()}
+	g.metrics = newGWMetrics(g, cfg.Version)
+	g.addBackend(cfg.Backend)
 	return g
+}
+
+func (g *Gateway) addBackend(name string) {
+	tc := g.cfg.Tunnel
+	tc.Observer = backendObserver{m: g.metrics, name: name}
+	g.metrics.initBackend(name)
+	g.mu.Lock()
+	g.backends[name] = &Backend{
+		Name:    name,
+		Session: tunnel.NewSession(tunnel.RoleGateway, tc, [wire.SessionIDLen]byte{}, nil),
+	}
+	g.mu.Unlock()
 }
 
 // Backend returns a backend by name (nil if unknown).
@@ -116,11 +134,17 @@ func (g *Gateway) ServePlayers(ln net.Listener, b *Backend) error {
 			go g.handleMinecraft(c, b)
 			continue
 		}
-		open := wire.Open{Src: addrPort(c.RemoteAddr()), Dst: addrPort(c.LocalAddr())}
-		st := b.Session.AddStream(c, open)
-		g.log.Info("player connected", "stream", st.ID(), "src", open.Src.String(),
-			"tunnel_up", b.Session.Connected())
+		g.addStream(b, c, "l4", g.log.With("src", c.RemoteAddr().String()))
 	}
+}
+
+// addStream hands a player connection to the backend's session.
+func (g *Gateway) addStream(b *Backend, c net.Conn, kind string, log *slog.Logger) *tunnel.Stream {
+	open := wire.Open{Src: addrPort(c.RemoteAddr()), Dst: addrPort(c.LocalAddr())}
+	st := b.Session.AddStream(c, open)
+	g.metrics.conns.Inc(b.Name, resultOpened)
+	log.Info("player connected", "stream", st.ID(), "kind", kind, "tunnel_up", b.Session.Connected())
+	return st
 }
 
 func addrPort(a net.Addr) netip.AddrPort {
@@ -159,40 +183,65 @@ func (g *Gateway) handleTunnel(nc net.Conn) {
 
 // Status is the JSON status document.
 type Status struct {
+	Version  string          `json:"version"`
 	Uptime   string          `json:"uptime"`
 	Backends []BackendStatus `json:"backends"`
 }
 
-// BackendStatus describes one backend.
+// BackendStatus describes one backend. Durations are given both as Go
+// duration strings (for people) and in seconds (for scripts).
 type BackendStatus struct {
-	Name           string              `json:"name"`
-	Session        string              `json:"session"`
-	Connected      bool                `json:"connected"`
-	Streams        int                 `json:"streams"`
+	Name      string `json:"name"`
+	Session   string `json:"session"`
+	Connected bool   `json:"connected"`
+	// UpSince is set while connected; DownSince (and DownFor) while not.
+	UpSince        time.Time `json:"up_since,omitzero"`
+	DownSince      time.Time `json:"down_since,omitzero"`
+	DownFor        string    `json:"down_for,omitempty"`
+	DownForSeconds float64   `json:"down_for_seconds,omitempty"`
+	// LastOutage is the most recent tunnel outage that ended in a resume
+	// (what players perceived as a freeze).
+	LastOutage        string  `json:"last_outage,omitempty"`
+	LastOutageSeconds float64 `json:"last_outage_seconds,omitempty"`
+	Streams           int     `json:"streams"` // = players
+	// HeldPlayers: all streams while the tunnel is down, else held logins.
+	HeldPlayers    int64               `json:"held_players"`
+	Held           int64               `json:"held,omitempty"` // logins held by -minecraft
 	Connects       uint64              `json:"connects"`
+	Resumes        uint64              `json:"resumes"`
+	NewSessions    uint64              `json:"new_sessions"`
 	Disconnects    uint64              `json:"disconnects"`
 	LastConnect    time.Time           `json:"last_connect,omitzero"`
 	LastDisconnect time.Time           `json:"last_disconnect,omitzero"`
+	BytesToServer  uint64              `json:"bytes_to_server"`
+	BytesToPlayer  uint64              `json:"bytes_to_player"`
+	BufferedBytes  int                 `json:"buffered_bytes"`
 	MaxTxBuffered  int                 `json:"max_tx_buffered"`
-	Held           int64               `json:"held,omitempty"`
+	StatusAnswered uint64              `json:"status_answered,omitempty"`
 	StreamInfo     []tunnel.StreamInfo `json:"stream_info,omitempty"`
 }
 
 // Status returns a snapshot.
 func (g *Gateway) Status(detail bool) Status {
-	g.mu.Lock()
-	bs := make([]*Backend, 0, len(g.backends))
-	for _, b := range g.backends {
-		bs = append(bs, b)
-	}
-	g.mu.Unlock()
-	st := Status{Uptime: time.Since(g.started).Round(time.Second).String()}
-	for _, b := range bs {
+	st := Status{Version: g.cfg.Version, Uptime: time.Since(g.started).Round(time.Second).String()}
+	for _, b := range g.backendList() {
 		s := b.Session.Stats()
 		id := b.Session.ID()
 		bst := BackendStatus{Name: b.Name, Session: hex.EncodeToString(id[:]), Connected: s.Connected,
-			Streams: s.Streams, Connects: s.Connects, Disconnects: s.Disconnects,
-			LastConnect: s.LastConnect, LastDisconnect: s.LastDisconnect, MaxTxBuffered: s.MaxTxBuffered, Held: b.held.Load()}
+			DownSince: s.DownSince, Streams: s.Streams, HeldPlayers: heldPlayers(b, s), Held: b.held.Load(),
+			Connects: s.Connects, Resumes: s.Resumes, NewSessions: s.NewSessions, Disconnects: s.Disconnects,
+			LastConnect: s.LastConnect, LastDisconnect: s.LastDisconnect,
+			BytesToServer: s.BytesFromLocal, BytesToPlayer: s.BytesToLocal, BufferedBytes: s.TxBuffered + s.RxQueued,
+			MaxTxBuffered: s.MaxTxBuffered, StatusAnswered: b.statusAnswered.Load()}
+		if s.Connected {
+			bst.UpSince = s.LastConnect
+		} else {
+			d := time.Since(s.DownSince)
+			bst.DownFor, bst.DownForSeconds = d.Round(time.Millisecond).String(), d.Seconds()
+		}
+		if s.LastOutage > 0 {
+			bst.LastOutage, bst.LastOutageSeconds = s.LastOutage.Round(time.Millisecond).String(), s.LastOutage.Seconds()
+		}
 		if detail {
 			bst.StreamInfo = b.Session.StreamInfos()
 		}
@@ -201,9 +250,11 @@ func (g *Gateway) Status(detail bool) Status {
 	return st
 }
 
-// AdminHandler serves /status (JSON; ?detail=1 for per-stream info) and /healthz.
+// AdminHandler serves /status (JSON; ?detail=1 for per-stream info),
+// /metrics (Prometheus text format) and /healthz.
 func (g *Gateway) AdminHandler() http.Handler {
 	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", g.metricsHandler())
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok\n")) })
 	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

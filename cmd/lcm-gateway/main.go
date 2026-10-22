@@ -20,10 +20,13 @@ import (
 	"lcm/internal/tunnel"
 )
 
+// version is set at build time: -ldflags "-X main.version=...".
+var version = "dev"
+
 func main() {
 	listen := flag.String("listen", cliutil.EnvDefault("LCM_LISTEN", ":25565"), "player listen address (env LCM_LISTEN)")
 	tunnelListen := flag.String("tunnel-listen", cliutil.EnvDefault("LCM_TUNNEL_LISTEN", ":7000"), "relay tunnel listen address (env LCM_TUNNEL_LISTEN)")
-	admin := flag.String("admin-listen", cliutil.EnvDefault("LCM_ADMIN_LISTEN", ""), "HTTP address for /status and /healthz (empty = off; env LCM_ADMIN_LISTEN)")
+	admin := flag.String("admin-listen", cliutil.EnvDefault("LCM_ADMIN_LISTEN", ""), "HTTP address for /status, /metrics and /healthz (empty = off; env LCM_ADMIN_LISTEN)")
 	backend := flag.String("backend", "default", "backend name relays must present")
 	token := flag.String("token", "", "shared tunnel secret (prefer -token-file / LCM_TOKEN / LCM_TOKEN_FILE)")
 	tokenFile := flag.String("token-file", "", "file containing the shared tunnel secret")
@@ -55,6 +58,7 @@ func main() {
 		Backend:   *backend,
 		Logger:    log,
 		Minecraft: mc,
+		Version:   version,
 		Tunnel:    tunnel.Config{Token: tok, Window: int(window), PingInterval: *ping, DeadTimeout: *dead},
 	})
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
@@ -80,7 +84,7 @@ func main() {
 		}
 		go http.Serve(al, g.AdminHandler())
 	}
-	log.Info("serving", "players", pl.Addr().String(), "tunnel", tl.Addr().String(), "backend", *backend, "window", int(window), "minecraft", *minecraft)
+	log.Info("serving", "players", pl.Addr().String(), "tunnel", tl.Addr().String(), "backend", *backend, "window", int(window), "minecraft", *minecraft, "version", version)
 	<-ctx.Done()
 	log.Info("shutting down")
 	pl.Close()

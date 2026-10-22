@@ -57,6 +57,8 @@ type Result struct {
 	Restore                                               *api.RestoreResult
 	// Blackout is how long the workload was not running: final dump start to restore finished.
 	Blackout time.Duration
+	// RolledBack: the destination restore failed and the workload was restored on the source node.
+	RolledBack bool
 }
 
 func Migrate(ctx context.Context, kc kubernetes.Interface, o Options) (*Result, error) {
@@ -190,6 +192,7 @@ func Migrate(ctx context.Context, kc kubernetes.Interface, o Options) (*Result, 
 		}
 		logf("rolled back: workload restored on %s as %s", rb.DestNode, rb.DestPod)
 		res.DestPod, res.DestNode, key, dstURL, rolledBack = rb.DestPod, rb.DestNode, rb.key, srcURL, true
+		res.RolledBack = true
 	}
 restored:
 	var rr api.RestoreResult
@@ -338,7 +341,11 @@ func rollback(ctx context.Context, kc kubernetes.Interface, o Options, src *core
 	}); err != nil {
 		return nil, fmt.Errorf("rollback pod never parked: %w", err)
 	}
-	body, _ := json.Marshal(map[string]string{"destURL": srcURL, "destKey": rbKey})
+	fwdURL := srcURL
+	if srcURL == dstURL {
+		fwdURL = "" // same node: the agent moves the staging instead of copying it
+	}
+	body, _ := json.Marshal(map[string]string{"destURL": fwdURL, "destKey": rbKey})
 	t0 := time.Now()
 	if _, err := agentDo(ctx, dstURL, o.Token, http.MethodPost, "/v1/stage/"+key+"/forward", bytes.NewReader(body)); err != nil {
 		return nil, fmt.Errorf("forwarding images back to %s: %w", res.SourceNode, err)

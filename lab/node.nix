@@ -19,6 +19,8 @@ in
       tokenFile = "/etc/lcm/token";
       deriveTokenFromK3s = false; # node2/3 are k3s agents without a server token
       stagingSize = "60%";
+      # Exercise log shipping in the lab: lab/manifests/victorialogs.yaml runs a VictoriaLogs NodePort.
+      logShipping.victoriaLogsUrl = "http://127.0.0.1:30428";
     };
     environment.etc."lcm/token".text = "lab-token-not-secret"; # lab only: lands in the store
     system.stateVersion = "26.05";

@@ -73,3 +73,31 @@ type RestoreResult struct {
 	ExitCode    int       `json:"exitCode"`
 	Error       string    `json:"error,omitempty"`
 }
+
+// RestoreEvent is one line of /var/lib/lcm/events/restores.jsonl, appended by lcm-runc after
+// every restore attempt and turned into metrics by the agent.
+type RestoreEvent struct {
+	Key string `json:"key"`
+	RestoreResult
+}
+
+// MigrationReport is what the lcm CLI sends to the agents when a migration ends, for metrics and
+// for `lcm history`.
+type MigrationReport struct {
+	ID         string    `json:"id"`
+	Time       time.Time `json:"time"`
+	Namespace  string    `json:"namespace"`
+	SourcePod  string    `json:"sourcePod"`
+	SourceNode string    `json:"sourceNode"`
+	DestPod    string    `json:"destPod"`
+	DestNode   string    `json:"destNode"`
+	// Outcome: success, rolled_back (restore failed, workload back on the source node),
+	// aborted (failed before the source stopped; it kept running), failed (needs an operator).
+	Outcome    string  `json:"outcome"`
+	Error      string  `json:"error,omitempty"`
+	BlackoutMS int64   `json:"blackoutMs,omitempty"`
+	FrozenMS   int64   `json:"frozenMs,omitempty"`
+	RestoreMS  int64   `json:"restoreMs,omitempty"`
+	PreDumps   []Round `json:"preDumps,omitempty"`
+	TotalMS    int64   `json:"totalMs"`
+}

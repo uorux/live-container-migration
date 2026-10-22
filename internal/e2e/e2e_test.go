@@ -2,6 +2,8 @@ package e2e
 
 import (
 	"context"
+	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -35,6 +37,25 @@ func TestTunnelDropMidTransfer(t *testing.T) {
 	}
 	if rh.r.SessionID() != sid || h.gwStats().Connects < 5 {
 		t.Fatalf("session changed or too few reconnects: %+v", h.gwStats())
+	}
+	// Every drop ended in a resume and was observed as an outage; bytes were counted.
+	var mb strings.Builder
+	h.gw.WriteMetrics(&mb)
+	metricsText := mb.String()
+	st := h.gwStats()
+	for _, want := range []string{
+		fmt.Sprintf(`lcm_gateway_tunnel_outage_seconds_count{backend="default"} %d`, st.Resumes),
+		fmt.Sprintf(`lcm_gateway_tunnel_connects_total{backend="default",kind="resume"} %d`, st.Resumes),
+		`lcm_gateway_tunnel_connects_total{backend="default",kind="new_session"} 1`,
+		`lcm_gateway_bytes_total{backend="default",direction="to_player"} ` + strconv.FormatFloat(float64(st.BytesToLocal), 'g', -1, 64),
+		`lcm_gateway_player_connections_total{backend="default",result="opened"} 8`,
+	} {
+		if !strings.Contains(metricsText, want+"\n") {
+			t.Errorf("metrics lack %q:\n%s", want, metricsText)
+		}
+	}
+	if st.Resumes < 4 || st.BytesToLocal < 8*3<<20 {
+		t.Fatalf("resumes %d, bytes to players %d", st.Resumes, st.BytesToLocal)
 	}
 	// PROXY headers carried the players' real (source) addresses.
 	hdrs := h.echo.Headers()

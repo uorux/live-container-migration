@@ -92,7 +92,9 @@ func (g *Gateway) handleMinecraft(c net.Conn, b *Backend) {
 			}
 			log.Debug("legacy ping answered locally")
 			c.SetWriteDeadline(time.Now().Add(mc.SniffTimeout))
-			c.Write(mcproto.LegacyKick(127, mc.VersionName, mc.MOTD, 0, 0))
+			if _, err := c.Write(mcproto.LegacyKick(127, mc.VersionName, mc.MOTD, 0, 0)); err == nil {
+				g.statusAnswered(b)
+			}
 			gracefulClose(c)
 			return
 		}
@@ -121,7 +123,7 @@ func (g *Gateway) handleMinecraft(c net.Conn, b *Backend) {
 			g.addStream(b, &replayConn{Conn: c, prefix: rd.Raw()}, "status", log)
 			return
 		}
-		g.answerStatus(c, rd, hs)
+		g.answerStatus(c, b, rd, hs)
 		return
 	}
 
@@ -152,17 +154,10 @@ func (g *Gateway) handleMinecraft(c net.Conn, b *Backend) {
 	go g.hold(hc, st, b, keepalive, limit, log.With("stream", st.ID()))
 }
 
-func (g *Gateway) addStream(b *Backend, c net.Conn, kind string, log *slog.Logger) *tunnel.Stream {
-	open := wire.Open{Src: addrPort(c.RemoteAddr()), Dst: addrPort(c.LocalAddr())}
-	st := b.Session.AddStream(c, open)
-	log.Info("player connected", "stream", st.ID(), "kind", kind, "tunnel_up", b.Session.Connected())
-	return st
-}
-
 // answerStatus serves the server list ping from the gateway while no relay
 // is connected: a status document with the configured MOTD and the client's
 // own protocol number (so the client shows no version mismatch), then Pong.
-func (g *Gateway) answerStatus(c net.Conn, rd *mcproto.Reader, hs mcproto.Handshake) {
+func (g *Gateway) answerStatus(c net.Conn, b *Backend, rd *mcproto.Reader, hs mcproto.Handshake) {
 	mc := g.cfg.Minecraft
 	defer gracefulClose(c)
 	c.SetDeadline(time.Now().Add(mc.SniffTimeout))
@@ -177,6 +172,7 @@ func (g *Gateway) answerStatus(c net.Conn, rd *mcproto.Reader, hs mcproto.Handsh
 			if _, err := c.Write(mcproto.StatusResponse(doc)); err != nil {
 				return
 			}
+			g.statusAnswered(b)
 		case id == 0x01 && len(body) == 8:
 			c.Write(mcproto.AppendPacket(nil, 0x01, body))
 			return
@@ -184,6 +180,11 @@ func (g *Gateway) answerStatus(c net.Conn, rd *mcproto.Reader, hs mcproto.Handsh
 			return
 		}
 	}
+}
+
+func (g *Gateway) statusAnswered(b *Backend) {
+	b.statusAnswered.Add(1)
+	g.metrics.statusResp.Inc(b.Name)
 }
 
 // hold keeps a login stream alive until the server's first byte arrives
@@ -216,14 +217,18 @@ func (g *Gateway) hold(hc *holdConn, st *tunnel.Stream, b *Backend, keepalive bo
 			}
 			if err != nil {
 				log.Info("keepalive write failed; dropping player", "err", err)
-				st.Reset(wire.ResetLocal, "keepalive write failed")
+				if st.Reset(wire.ResetLocal, "keepalive write failed") {
+					g.metrics.conns.Inc(b.Name, resultResetByPlayer)
+				}
 				return
 			}
 			injected++
 		case <-kick.C:
 			if hc.expire(mcproto.LoginDisconnect(mc.HoldMessage)) {
 				log.Info("hold limit reached; player disconnected", "held", time.Since(start).Round(time.Millisecond))
-				st.Reset(wire.ResetLocal, "hold limit reached")
+				if st.Reset(wire.ResetLocal, "hold limit reached") {
+					g.metrics.conns.Inc(b.Name, resultHoldTimeout)
+				}
 			}
 			return
 		}

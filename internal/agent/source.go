@@ -3,8 +3,10 @@ package agent
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"lcm/internal/api"
@@ -134,6 +136,12 @@ func (a *Agent) checkpoint(ctx context.Context, req api.CheckpointRequest, emit 
 	if err != nil {
 		return abort(err)
 	}
+	// The destination injects lcm-relay from its own node's lcm version, which may differ from
+	// the binary this process runs (an upgrade in between): CRIU would refuse the mismatched
+	// executable. Ship the exact running binary; lcm-runc puts it in place before restoring.
+	if err := captureRelay(st.Pid, dir); err != nil {
+		return abort(fmt.Errorf("capturing the running relay binary: %w", err))
+	}
 
 	res.FreezeStart = time.Now()
 	err = runc.Checkpoint(bg, req.ContainerID, runc.CheckpointOpts{
@@ -187,6 +195,13 @@ func (a *Agent) checkpoint(ctx context.Context, req api.CheckpointRequest, emit 
 				return fmt.Errorf("shipping source addresses: %w", err)
 			}
 		}
+		for _, f := range []string{stage.RelayExeName, stage.RelayPathName} {
+			if _, err := os.Stat(filepath.Join(dir, f)); err == nil {
+				if err := dst.putFile(bg, filepath.Join(dir, f), f); err != nil {
+					return fmt.Errorf("shipping %s: %w", f, err)
+				}
+			}
+		}
 		return dst.ready(bg)
 	}
 	for attempt := 1; ; attempt++ {
@@ -205,6 +220,36 @@ func (a *Agent) checkpoint(ctx context.Context, req api.CheckpointRequest, emit 
 	res.FrozenMS = res.ReadyAt.Sub(res.FreezeStart).Milliseconds()
 	emit(api.Event{Phase: "ready", Millis: res.FrozenMS, Message: "destination staged"})
 	return res, nil
+}
+
+// captureRelay saves the container init's executable if it is lcm-relay: its bytes (read via
+// /proc/<pid>/exe, valid even if the file was replaced) and its path inside the container.
+func captureRelay(pid int, dir string) error {
+	exe := fmt.Sprintf("/proc/%d/exe", pid)
+	target, err := os.Readlink(exe)
+	if err != nil {
+		return err
+	}
+	if filepath.Base(strings.TrimSuffix(target, " (deleted)")) != "lcm-relay" {
+		return nil // no relay in this container
+	}
+	src, err := os.Open(exe)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+	out, err := os.OpenFile(filepath.Join(dir, stage.RelayExeName), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o755)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, src); err != nil {
+		out.Close()
+		return err
+	}
+	if err := out.Close(); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, stage.RelayPathName), []byte(strings.TrimSuffix(target, " (deleted)")), 0o644)
 }
 
 // alive reports whether the container still has running (or frozen) processes.

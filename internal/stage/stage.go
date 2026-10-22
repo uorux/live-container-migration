@@ -30,10 +30,17 @@ func (k Key) String() string { return k.Namespace + "_" + k.Pod + "_" + k.Contai
 //	pre-N/           pre-dump image dirs
 //	rootfs-diff.tar  the source container's writable layer (OCI whiteouts)
 //	source-addrs     the source pod's IPs (see internal/netaddr)
+//	relay-exe        the exact lcm-relay binary the source process ran, and
+//	relay-path       its path inside the container (lcm-runc installs it before restoring)
 //	READY            written last; lcm-runc only restores when it exists
 //	READY.fenced     READY after the pod was fenced: never restored
 //	work/            CRIU work dir for the restore (logs)
 //	result.json      written by lcm-runc after the restore attempt
+const (
+	RelayExeName  = "relay-exe"
+	RelayPathName = "relay-path"
+)
+
 func RestoreDir(k Key) string { return filepath.Join(Root(), "restore", k.String()) }
 
 func ImagesDir(k Key) string  { return filepath.Join(RestoreDir(k), "images") }

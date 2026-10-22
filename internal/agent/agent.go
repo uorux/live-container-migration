@@ -20,6 +20,9 @@
 //	DELETE /v1/fence/{uid}                lift a fence (only for aborts; UIDs are never reused)
 //	GET    /v1/bin/{name}                 lcm-relay / lcm-gateway / lcm-loadtest binaries, so pods
 //	                                      can inject them from a stock image (no registry needed)
+//	POST   /v1/report                     lcm CLI: a finished migration's outcome (metrics + history)
+//	GET    /v1/migrations[?n=50]          migration history reported to this agent
+//	GET    /metrics                       Prometheus metrics (unauthenticated)
 //	GET    /healthz
 package agent
 
@@ -52,6 +55,7 @@ type Agent struct {
 	mu         sync.Mutex
 	migrations map[string]bool          // in-flight checkpoints, by container id
 	status     map[string]*checkpointSt // by migration id, for GET /v1/checkpoint/{id}
+	tm         *telemetry
 }
 
 type checkpointSt struct {
@@ -62,8 +66,13 @@ type checkpointSt struct {
 }
 
 func New(token, binDir string, log *slog.Logger) *Agent {
-	return &Agent{token: token, binDir: binDir, log: log, migrations: map[string]bool{}, status: map[string]*checkpointSt{}}
+	a := &Agent{token: token, binDir: binDir, log: log, migrations: map[string]bool{}, status: map[string]*checkpointSt{}}
+	a.tm = newTelemetry(a)
+	return a
 }
+
+// FollowRestores feeds lcm-runc's restore events into the metrics until ctx ends.
+func (a *Agent) FollowRestores(ctx context.Context) { a.tm.followRestores(ctx, a.log.Info) }
 
 // GC periodically removes fences older than maxAge (their pods are long gone; UIDs never repeat).
 func (a *Agent) GC(ctx context.Context, maxAge time.Duration) {
@@ -85,6 +94,9 @@ func (a *Agent) GC(ctx context.Context, maxAge time.Duration) {
 func (a *Agent) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "ok\n") })
+	mux.Handle("GET /metrics", a.tm.reg.Handler())
+	mux.HandleFunc("POST /v1/report", a.auth(a.handleReport))
+	mux.HandleFunc("GET /v1/migrations", a.auth(a.handleHistory))
 	mux.HandleFunc("POST /v1/checkpoint", a.auth(a.handleCheckpoint))
 	mux.HandleFunc("PUT /v1/stage/{key}/dir/{name}", a.auth(a.handlePutDir))
 	mux.HandleFunc("PUT /v1/stage/{key}/file/{name}", a.auth(a.handlePutFile))
@@ -174,6 +186,7 @@ func (a *Agent) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 	// The client can cancel only until the fence is written (see checkpoint); a dropped stream
 	// after that doesn't stop anything, and GET /v1/checkpoint/{id} reports the outcome.
 	res, err := a.checkpoint(r.Context(), req, emit)
+	a.tm.recordCheckpoint(res, err)
 	if err != nil {
 		ev := api.Event{Phase: "error", Message: err.Error(), Result: res}
 		emit(ev)
@@ -301,8 +314,18 @@ func (a *Agent) handleForward(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req ForwardRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.DestURL == "" || !validName(req.DestKey) {
-		http.Error(w, "destURL and destKey required", http.StatusBadRequest)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || !validName(req.DestKey) {
+		http.Error(w, "destKey required", http.StatusBadRequest)
+		return
+	}
+	if req.DestURL == "" {
+		// Same node: move, don't copy (the images can be most of the tmpfs).
+		if err := moveStage(dir, filepath.Join(stage.Root(), "restore", req.DestKey)); err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		a.log.Info("moved staged restore", "key", r.PathValue("key"), "as", req.DestKey)
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	ctx := context.WithoutCancel(r.Context())
@@ -337,6 +360,34 @@ func (a *Agent) handleForward(w http.ResponseWriter, r *http.Request) {
 	}
 	a.log.Info("forwarded staged restore", "key", r.PathValue("key"), "to", req.DestURL, "as", req.DestKey)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// moveStage renames a staged restore to a new key on the same node, dropping per-attempt state
+// (work dir, result, READY markers) and marking it READY under the new key.
+func moveStage(from, to string) error {
+	if err := os.RemoveAll(to); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(to, 0o700); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(from)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		n := e.Name()
+		if n == "work" || n == "result.json" || strings.HasPrefix(n, "READY") {
+			continue
+		}
+		if err := os.Rename(filepath.Join(from, n), filepath.Join(to, n)); err != nil {
+			return err
+		}
+	}
+	if _, err := os.Stat(filepath.Join(to, "images")); err != nil {
+		return fmt.Errorf("no final images to move")
+	}
+	return os.WriteFile(filepath.Join(to, "READY"), []byte(time.Now().Format(time.RFC3339Nano)), 0o644)
 }
 
 // handleWait blocks until the staged restore is READY (204), or up to ?timeout (default 60s,

@@ -1,0 +1,14 @@
+# Scrape lcm-gateway's admin port. Requires the lcm-gateway-admin Service to carry
+# labels {app: lcm-gateway} and name its port "admin".
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: lcm-gateway
+  namespace: lcm-test
+spec:
+  selector:
+    matchLabels: {app: lcm-gateway}
+  endpoints:
+  - port: admin
+    path: /metrics
+    interval: 30s

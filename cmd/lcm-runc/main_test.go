@@ -1,6 +1,11 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
+
+	"lcm/internal/stage"
+
 	"reflect"
 	"strings"
 	"testing"
@@ -128,5 +133,40 @@ func TestOCISpecNetns(t *testing.T) {
 		}{"network", "/var/run/netns/cni-1"})
 	if got := s.netns(); got != "/var/run/netns/cni-1" {
 		t.Errorf("netns = %q", got)
+	}
+}
+
+func TestInstallRelay(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("LCM_STATE_DIR", root)
+	key := stage.Key{Namespace: "ns", Pod: "mc-m1", Container: "mc"}
+	if err := os.MkdirAll(stage.RestoreDir(key), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(stage.RestoreDir(key), stage.RelayExeName), []byte("old-relay-bytes"), 0o755)
+	os.WriteFile(filepath.Join(stage.RestoreDir(key), stage.RelayPathName), []byte("/lcm/lcm-relay"), 0o644)
+	emptyDir := t.TempDir()
+	os.WriteFile(filepath.Join(emptyDir, "lcm-relay"), []byte("new-relay-from-this-node"), 0o755)
+	spec := &ociSpec{}
+	spec.Mounts = append(spec.Mounts,
+		struct {
+			Destination string `json:"destination"`
+			Source      string `json:"source"`
+		}{"/data", t.TempDir()},
+		struct {
+			Destination string `json:"destination"`
+			Source      string `json:"source"`
+		}{"/lcm", emptyDir})
+	if err := installRelay(spec, key); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(filepath.Join(emptyDir, "lcm-relay"))
+	if string(got) != "old-relay-bytes" {
+		t.Fatalf("relay = %q, want the source's binary", got)
+	}
+	// Nothing staged: no-op.
+	os.Remove(filepath.Join(stage.RestoreDir(key), stage.RelayPathName))
+	if err := installRelay(spec, key); err != nil {
+		t.Fatal(err)
 	}
 }

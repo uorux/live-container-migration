@@ -107,7 +107,11 @@ func parseCreate(args []string) createArgs {
 
 func main() {
 	inv := parse(os.Args[1:])
-	logf("argv=%q", os.Args[1:])
+	// Log the lifecycle calls (not state/kill/events polling, which containerd makes constantly).
+	switch inv.cmd {
+	case "create", "start", "delete", "restore", "checkpoint":
+		logf("%s %q", inv.cmd, os.Args[1:])
+	}
 	switch inv.cmd {
 	case "create":
 		create(inv)
@@ -173,6 +177,14 @@ func restore(inv invocation, c createArgs, spec *ociSpec, key stage.Key) int {
 		}
 		b, _ := json.MarshalIndent(res, "", "  ")
 		os.WriteFile(stage.ResultFile(key), b, 0o644)
+		// One line per attempt for the agent's metrics (lcm_restores_total, lcm_restore_seconds).
+		if line, err := json.Marshal(api.RestoreEvent{Key: key.String(), RestoreResult: res}); err == nil {
+			os.MkdirAll(filepath.Dir(agentEventsFile()), 0o755)
+			if f, err := os.OpenFile(agentEventsFile(), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
+				f.Write(append(line, '\n'))
+				f.Close()
+			}
+		}
 	}()
 	fail := func(err error) int {
 		res.Error, res.ExitCode = err.Error(), 1
@@ -225,6 +237,11 @@ func restore(inv invocation, c createArgs, spec *ociSpec, key stage.Key) int {
 	}
 	args = append(args, c.id)
 
+	// The process image maps the relay binary it was started with; install exactly that one.
+	if err := installRelay(spec, key); err != nil {
+		return fail(fmt.Errorf("installing the source's relay binary: %w", err))
+	}
+
 	// Old pod addresses as aliases on lo, so CRIU can rebuild sockets bound to them.
 	netns := spec.netns()
 	var aliases []netip.Addr
@@ -274,6 +291,9 @@ func restore(inv invocation, c createArgs, spec *ociSpec, key stage.Key) int {
 	return 0
 }
 
+// agentEventsFile mirrors agent.RestoreEventsFile (lcm-runc stays free of the agent package).
+func agentEventsFile() string { return filepath.Join(stage.Root(), "events", "restores.jsonl") }
+
 func injectFailure() bool {
 	f := filepath.Join(stage.Root(), "FAIL_NEXT_RESTORE")
 	b, err := os.ReadFile(f)
@@ -288,6 +308,40 @@ func injectFailure() bool {
 		os.WriteFile(f, []byte(fmt.Sprint(n-1)), 0o644)
 	}
 	return true
+}
+
+// installRelay writes the staged relay-exe over the file at relay-path inside the new
+// container, resolving that path through the spec's bind mounts (the relay lives on an emptyDir
+// an init container filled from this node's lcm version, which may differ).
+func installRelay(spec *ociSpec, key stage.Key) error {
+	exe := filepath.Join(stage.RestoreDir(key), stage.RelayExeName)
+	pathB, err := os.ReadFile(filepath.Join(stage.RestoreDir(key), stage.RelayPathName))
+	if os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	inCtr := filepath.Clean(strings.TrimSpace(string(pathB)))
+	var host string
+	best := -1
+	for _, m := range spec.Mounts {
+		d := filepath.Clean(m.Destination)
+		if (inCtr == d || strings.HasPrefix(inCtr, d+"/")) && len(d) > best && m.Source != "" {
+			best, host = len(d), filepath.Join(m.Source, strings.TrimPrefix(inCtr, d))
+		}
+	}
+	if host == "" {
+		return fmt.Errorf("no bind mount covers %s", inCtr)
+	}
+	b, err := os.ReadFile(exe)
+	if err != nil {
+		return err
+	}
+	tmp := host + ".lcm-tmp"
+	if err := os.WriteFile(tmp, b, 0o755); err != nil {
+		return err
+	}
+	return os.Rename(tmp, host)
 }
 
 func readPid(path string) int {
@@ -305,7 +359,11 @@ type ociSpec struct {
 		Path string `json:"path"`
 	} `json:"root"`
 	Annotations map[string]string `json:"annotations"`
-	Linux       struct {
+	Mounts      []struct {
+		Destination string `json:"destination"`
+		Source      string `json:"source"`
+	} `json:"mounts"`
+	Linux struct {
 		Namespaces []struct {
 			Type string `json:"type"`
 			Path string `json:"path"`

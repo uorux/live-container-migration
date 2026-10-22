@@ -338,8 +338,9 @@ Behaviour, and where it differs from §5.1:
 - **Legacy ping** (0xFE, vanilla's detection rule): answered with a `§1` kick-style reply while down,
   streamed while up. **Anything that is not a valid handshake is closed** (not passed through as
   §5.1 suggested).
-- `-hold-keepalive query|none` is not implemented (setcompression only), and there are no metrics
-  beyond `held` (currently held logins) in the gateway's `/status`.
+- `-hold-keepalive query|none` is not implemented (setcompression only). Held logins show up as
+  `held` in the gateway's `/status` and in `lcm_gateway_held_players` /
+  `lcm_gateway_player_connections_total{result="hold_timeout"}` on `/metrics`.
 
 `lcm-relay` readiness (phase 2): before the first tunnel connection of a fresh process it polls
 `-upstream` every `-ready-interval` (1 s): a TCP connect by default (`-wait-ready`, on), or with
