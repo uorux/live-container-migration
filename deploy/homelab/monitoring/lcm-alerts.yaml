@@ -48,7 +48,7 @@ spec:
         summary: "lcm-runc restore failures on {{ $labels.instance }}"
         description: "Restore attempts failed on this node; see /var/lib/lcm/lcm-runc.log and the CRIU restore.log."
     - alert: LcmBlackoutSlow
-      expr: (increase(lcm_migration_blackout_seconds_count[1h]) - increase(lcm_migration_blackout_seconds_bucket{le="12"}[1h])) > 0
+      expr: (increase(lcm_migration_blackout_seconds_count[1h]) - ignoring(le) increase(lcm_migration_blackout_seconds_bucket{le="12"}[1h])) > 0
       labels: {severity: warning}
       annotations:
         summary: "A live migration froze its workload for more than 12 s"
