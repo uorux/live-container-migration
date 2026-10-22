@@ -65,6 +65,9 @@ type Backend struct {
 	lastWake atomic.Int64
 	// statusAnswered counts status pings the gateway answered itself.
 	statusAnswered atomic.Uint64
+	// info is the server's last status ping result (for the menu).
+	info     atomic.Pointer[serverInfo]
+	infoBusy atomic.Bool
 }
 
 // Gateway serves player and tunnel listeners.
@@ -73,8 +76,12 @@ type Gateway struct {
 	log      *slog.Logger
 	mu       sync.Mutex
 	backends map[string]*Backend
+	order    []string // backend names in configuration order
 	started  time.Time
 	metrics  *gwMetrics
+
+	cookieMu    sync.Mutex
+	usedCookies map[string]time.Time // menu cookie nonces already redeemed
 }
 
 // New creates a gateway with a single backend.
@@ -95,7 +102,8 @@ func New(cfg Config) *Gateway {
 	if cfg.Version == "" {
 		cfg.Version = "dev"
 	}
-	g := &Gateway{cfg: cfg, log: cfg.Logger, backends: map[string]*Backend{}, started: time.Now()}
+	g := &Gateway{cfg: cfg, log: cfg.Logger, backends: map[string]*Backend{}, started: time.Now(),
+		usedCookies: map[string]time.Time{}}
 	g.metrics = newGWMetrics(g, cfg.Version)
 	g.addBackend(cfg.Backend)
 	for _, name := range cfg.Backends {
@@ -109,18 +117,25 @@ func New(cfg Config) *Gateway {
 // Route picks the backend for a player who asked for host (as sent in the
 // handshake; Forge markers and a trailing dot are ignored).
 func (g *Gateway) Route(host string) *Backend {
+	b, _ := g.route(host)
+	return b
+}
+
+// route is Route, and whether host named a backend (rather than falling
+// back to the default one).
+func (g *Gateway) route(host string) (*Backend, bool) {
 	host = strings.ToLower(mcproto.CleanHost(host))
 	if name, ok := g.cfg.Routes[host]; ok {
 		if b := g.Backend(name); b != nil {
-			return b
+			return b, true
 		}
 	}
 	if label, _, ok := strings.Cut(host, "."); ok {
 		if b := g.Backend(label); b != nil {
-			return b
+			return b, true
 		}
 	}
-	return g.DefaultBackend()
+	return g.DefaultBackend(), false
 }
 
 func (g *Gateway) addBackend(name string) {
@@ -128,6 +143,7 @@ func (g *Gateway) addBackend(name string) {
 	tc.Observer = backendObserver{m: g.metrics, name: name}
 	g.metrics.initBackend(name)
 	g.mu.Lock()
+	g.order = append(g.order, name)
 	g.backends[name] = &Backend{
 		Name:    name,
 		Session: tunnel.NewSession(tunnel.RoleGateway, tc, [wire.SessionIDLen]byte{}, nil),
@@ -253,8 +269,17 @@ func (g *Gateway) addStream(b *Backend, c net.Conn, kind string, log *slog.Logge
 }
 
 // maybeWake asks for an asleep backend to be started (see Config.Wake).
-func (g *Gateway) maybeWake(b *Backend) {
+func (g *Gateway) maybeWake(b *Backend) { g.wake(b, nil) }
+
+// wake calls Config.Wake for b in the background, at most every WakeEvery.
+// done, if not nil, gets the result; nil also when the call was skipped
+// because one was made recently.
+func (g *Gateway) wake(b *Backend, done func(error)) {
+	if done == nil {
+		done = func(error) {}
+	}
 	if g.cfg.Wake == nil || b.Session.Connected() {
+		done(nil)
 		return
 	}
 	every := g.cfg.WakeEvery
@@ -264,18 +289,22 @@ func (g *Gateway) maybeWake(b *Backend) {
 	now := time.Now().UnixNano()
 	last := b.lastWake.Load()
 	if now-last < int64(every) || !b.lastWake.CompareAndSwap(last, now) {
+		done(nil)
 		return
 	}
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if err := g.cfg.Wake(ctx, b.Name); err != nil {
+		err := g.cfg.Wake(ctx, b.Name)
+		if err != nil {
+			b.lastWake.CompareAndSwap(now, 0) // let the next player retry right away
 			g.metrics.wakes.Inc(b.Name, "error")
 			g.log.Warn("waking backend", "backend", b.Name, "err", err)
-			return
+		} else {
+			g.metrics.wakes.Inc(b.Name, "ok")
+			g.log.Info("woke backend", "backend", b.Name)
 		}
-		g.metrics.wakes.Inc(b.Name, "ok")
-		g.log.Info("woke backend", "backend", b.Name)
+		done(err)
 	}()
 }
 

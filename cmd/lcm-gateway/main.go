@@ -44,6 +44,9 @@ func main() {
 	holdInterval := flag.Duration("hold-interval", 10*time.Second, "keepalive interval for held logins; must stay well under the client's 30 s timeout (-minecraft)")
 	holdMax := flag.Duration("hold-max", 5*time.Minute, "kick a held login with -hold-message after this long (-minecraft)")
 	holdMessage := flag.String("hold-message", "The server did not start in time. Please try again later.", "Login Disconnect text when -hold-max passes (-minecraft)")
+	menu := flag.Bool("menu", envBool("LCM_MENU"), "players whose hostname names no backend get a server menu that starts the server they pick and transfers them to it (1.21.6+ clients; older ones get a list of addresses) instead of the default backend (-minecraft; env LCM_MENU=true)")
+	menuTitle := flag.String("menu-title", cliutil.EnvDefault("LCM_MENU_TITLE", "Minecraft servers"), "title of the server menu and its server list entry (env LCM_MENU_TITLE)")
+	labels := flag.String("label", cliutil.EnvDefault("LCM_LABELS", ""), "display names in the menu, backend=name pairs separated by commas (env LCM_LABELS)")
 	acceptProxy := flag.String("accept-proxy", cliutil.EnvDefault("LCM_ACCEPT_PROXY", ""), "comma-separated CIDRs (e.g. 127.0.0.1/32 for a local HAProxy with send-proxy-v2) whose player connections start with a PROXY v2 header (env LCM_ACCEPT_PROXY)")
 	wakeURLs := flag.String("wake-url", cliutil.EnvDefault("LCM_WAKE_URL", ""), "lcm-agent base URLs (comma-separated, e.g. http://node:7790) to wake an on-demand backend when a player arrives and its relay isn't connected (env LCM_WAKE_URL)")
 	wakeTokenFile := flag.String("wake-token-file", cliutil.EnvDefault("LCM_WAKE_TOKEN_FILE", ""), "file with the agents' wake token (env LCM_WAKE_TOKEN_FILE)")
@@ -56,10 +59,27 @@ func main() {
 		fmt.Fprintln(os.Stderr, "lcm-gateway:", err)
 		os.Exit(2)
 	}
+	labelMap := map[string]string{}
+	for _, l := range strings.Split(*labels, ",") {
+		if l = strings.TrimSpace(l); l == "" {
+			continue
+		}
+		be, name, ok := strings.Cut(l, "=")
+		if !ok {
+			fmt.Fprintln(os.Stderr, "lcm-gateway: -label wants backend=name, got", l)
+			os.Exit(2)
+		}
+		labelMap[strings.TrimSpace(be)] = strings.TrimSpace(name)
+	}
+	if *menu && !*minecraft {
+		fmt.Fprintln(os.Stderr, "lcm-gateway: -menu needs -minecraft")
+		os.Exit(2)
+	}
 	var mc *gateway.MinecraftConfig
 	if *minecraft {
 		mc = &gateway.MinecraftConfig{MOTD: *motd, VersionName: *statusVersion,
-			HoldInterval: *holdInterval, MaxHold: *holdMax, HoldMessage: *holdMessage}
+			HoldInterval: *holdInterval, MaxHold: *holdMax, HoldMessage: *holdMessage,
+			Menu: *menu, MenuTitle: *menuTitle, Labels: labelMap}
 	}
 	var trusted []netip.Prefix
 	for _, c := range strings.Split(*acceptProxy, ",") {
@@ -146,7 +166,7 @@ func main() {
 		}
 		go http.Serve(al, g.AdminHandler())
 	}
-	log.Info("serving", "players", pl.Addr().String(), "tunnel", tl.Addr().String(), "backend", *backend, "window", int(window), "minecraft", *minecraft, "version", version)
+	log.Info("serving", "players", pl.Addr().String(), "tunnel", tl.Addr().String(), "backend", *backend, "window", int(window), "minecraft", *minecraft, "menu", *menu, "version", version)
 	<-ctx.Done()
 	log.Info("shutting down")
 	pl.Close()

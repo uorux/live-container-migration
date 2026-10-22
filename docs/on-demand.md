@@ -373,7 +373,10 @@ An on-demand LivePod (`spec.onDemand: {backend: atm10, idleAfter: 10m}`) replace
   `POST /v1/wake/<backend>` (at most every 15 s per backend), holds the player, and the controller
   creates the pod once any old one is fully gone. Server-list pings don't wake (like AutoServer) and
   get the `-motd` (`{backend} is starting…`). Gateways outside the cluster use the agents' wake-only
-  token (`services.lcm.wakeTokenFile`), which can't call anything else.
+  token (`services.lcm.wakeTokenFile`), which can't call anything else. Only agents that run the
+  LivePod controller (`services.lcm.livePods.enable`) can wake; the others answer 503, and the
+  gateway tries the next URL. List at least the controller agents. A failed wake doesn't count
+  toward the 15 s limit.
 - Status: `kubectl get livepod` shows phase `Asleep` / `Sleeping` / `Waking`; metrics
   `lcm_livepod_running{phase}` and `lcm_gateway_wakes_total{backend,result}`;
   `LcmLivePodNotRunning` ignores asleep LivePods.
@@ -390,6 +393,59 @@ listener: `<backend>.<any domain>` goes to that backend (the forced-hosts scheme
 host=backend` adds exact names, anything else goes to `-backend`. Forge markers, case and a
 trailing dot are ignored. Each server's relay presents its name (`lcm-relay -backend atm10`).
 
+#### Server menu (replaces the lobby, as built)
+
+`lcm-gateway -minecraft -menu -menu-title "rooty.dev" -label "atm9=All the Mods 9,…"` turns the
+main address into a server picker. Players who connect with a hostname that names no backend
+(`mc.example.com`, or a bare IP) get the menu instead of the default backend; `<backend>.<domain>`
+and `-route` names still go straight to their server, as before. No lobby server runs.
+
+1. The gateway logs the player in itself: offline mode, no encryption. Nothing in the menu needs
+   to know who the player is, and each server still does its own online-mode login after the
+   transfer.
+2. It keeps the client in the configuration phase and shows a dialog: one button per backend with
+   its state (`3 playing`, `asleep`, `starting`, `offline`) and a tooltip with the version (from a
+   status ping through the tunnel, cached 5 s). It sends a Keep Alive every `-hold-interval`.
+3. When the player picks an asleep server, the gateway calls the waker (the same `-wake-url` path
+   a direct login uses) and shows "Starting …" with a counter. It gives up after `-hold-max`.
+4. Once the backend's relay is connected (with `-minecraft-ready`, that means the server answers
+   pings), the gateway stores a cookie (`lcm:route`, naming the backend, valid once for 30 s) and
+   sends Transfer to the address the player used.
+5. The client reconnects with handshake intent 3. The gateway asks for the cookie and sends the
+   connection to that backend, rewriting the intent to 2 (login). The backend therefore needs no
+   `accepts-transfers=true`. It sees an ordinary login, including Forge markers.
+
+Limits:
+- **Clients:** 1.21.6+ (dialogs; protocols 771–777, i.e. up to 26.3). Older clients that connect
+  to the menu address get a disconnect listing each server's direct address. A newer protocol gets
+  the same list, and the gateway logs a warning to update lcm, because packet IDs move between
+  releases (26.3 shifted Store Cookie, Transfer and Show Dialog by one).
+- **Vanilla clients only:** a modded client can open the menu, but the server it picks still
+  decides whether it may join (see §4). Modded players should keep using the pack's hostname.
+- **No in-game switching:** going back to the menu means reconnecting to the main address. Because
+  cookies are used once, an old choice is not replayed.
+- **Server list:** the menu address shows `<title>`, "N of M servers up, P playing" and the
+  client's own version (1.21.6+). Older clients see it as incompatible.
+
+How it was checked:
+- Packet IDs come from each release's data generator report (`packets.json`, 1.21.6 to 26.3).
+- Packet layouts were read from the decompiled 1.21.6, 1.21.10, 26.1.2 and 26.3 code, client
+  included. In particular, the configuration-phase Show Dialog carries the dialog inline as NBT,
+  and the client sends dialog clicks in the configuration phase.
+- The dialogs the gateway sends were loaded as a data pack into vanilla 1.21.6, 1.21.8, 1.21.10,
+  1.21.11, 26.1.2, 26.2 and 26.3 servers, which reject any dialog that doesn't parse. A broken
+  control dialog was rejected.
+- Unit tests cover the bytes, and e2e tests cover menu, pick, wake, transfer and cookie arrival
+  with the fake server.
+- Lab, with a real vanilla 1.21.10 client (portablemc, Xvfb, Mesa llvmpipe, clicks with
+  xdotool), on gateway2:
+  - The menu rendered, showing the asleep Fabric LivePod.
+  - The click woke it, and the notice counted the wait.
+  - The gateway sent the Transfer 19.5 s after the click.
+  - The client came back with the cookie, and "LabBot joined the game" on the Fabric server.
+  - A wake that failed (agent without the controller) showed "Couldn't start …" with a way back to
+    the list.
+
 | Phase | Work | Reuses | Done when |
 |---|---|---|---|
 | 0 (done) | Prove the login hold with real clients | – | §2 |
@@ -399,7 +455,7 @@ trailing dot are ignored. Each server's relay presents its name (`lcm-relay -bac
 | 3b | Move lifecycle into `lcm-controller` with a small `MinecraftServer` CRD (template, hostnames, idle settings); the gateway calls `wake` and reports player counts | phase 3a code | Several backends |
 | 4 | Host-based routing to several backends from one gateway (handshake host → backend; the session map already exists) | `backends` map | One LB IP for all servers |
 | 5 | CRIU hibernate (§5.5), with fallback to a cold boot | agent pre-dump/dump, `lcm-runc` restore-on-create | Modded wake ≤ 20 s |
-| opt | PicoLimbo + Transfer lobby for 1.20.5+ non-modded backends (§5.4 D) | phase 4 routing | – |
+| 4b (done, see "Server menu") | Lobby replacement: a dialog menu in the gateway for 1.21.6+ clients. It wakes the picked server, then transfers the player there with a one-time cookie. | phase 4 routing, waker | Pick an asleep server from the menu and join it |
 
 ## 7. Risks and open points
 

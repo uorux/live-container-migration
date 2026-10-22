@@ -89,6 +89,11 @@ panel("timeseries", "On-demand wakes", [('sum by (backend, result) (increase(lcm
 panel("state-timeline", "On-demand LivePods asleep", [('max by (namespace, livepod) (lcm_livepod_running{phase=~"Asleep|Sleeping"} + 1)', "{{namespace}}/{{livepod}}")], 12, 12,
       desc="Shown while asleep (stopped for idleness) or shutting down to sleep.")
 nextrow()
+panel("timeseries", "Server menu", [('sum by (result) (increase(lcm_gateway_menu_total[$__rate_interval]))', "{{result}}")], 0, 12,
+      desc="Players on the menu address (lcm-gateway -menu): shown, then transferred / quit / left / timeout. unsupported = a client older than 1.21.6 (or newer than this lcm knows) got the address list; arrived = a transferred player reached its server.")
+panel("timeseries", "Menu transfers by server", [('sum by (backend) (increase(lcm_gateway_menu_transfers_total[$__rate_interval]))', "{{backend}}")], 12, 12,
+      desc="Players the menu sent to each server.")
+nextrow()
 
 dash = {"title": "Live container migration", "uid": "lcm", "tags": ["lcm", "minecraft"], "timezone": "browser",
         "schemaVersion": 39, "refresh": "30s", "time": {"from": "now-24h", "to": "now"}, "panels": panels,

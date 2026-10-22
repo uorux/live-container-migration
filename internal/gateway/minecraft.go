@@ -37,6 +37,13 @@ type MinecraftConfig struct {
 	// SniffTimeout bounds reading the handshake (and Login Start) and a
 	// locally answered status exchange.
 	SniffTimeout time.Duration
+	// Menu sends players whose hostname names no backend to the server menu
+	// (menu.go) instead of the default backend.
+	Menu bool
+	// MenuTitle heads the menu and its server list entry.
+	MenuTitle string
+	// Labels are display names for backends in the menu.
+	Labels map[string]string
 }
 
 func (m *MinecraftConfig) defaults() {
@@ -60,6 +67,9 @@ func (m *MinecraftConfig) defaults() {
 	}
 	if m.SniffTimeout <= 0 {
 		m.SniffTimeout = 5 * time.Second
+	}
+	if m.MenuTitle == "" {
+		m.MenuTitle = "Minecraft servers"
 	}
 }
 
@@ -119,16 +129,27 @@ func (g *Gateway) handleMinecraft(c net.Conn, b *Backend) {
 		abortClose(c)
 		return
 	}
-	b = g.Route(hs.Host)
-	log = log.With("protocol", hs.Protocol, "host", mcproto.CleanHost(hs.Host), "backend", b.Name)
+	b, matched := g.route(hs.Host)
+	menu := mc.Menu && !matched
+	if menu {
+		log = log.With("protocol", hs.Protocol, "host", mcproto.CleanHost(hs.Host), "backend", "(menu)")
+	} else {
+		log = log.With("protocol", hs.Protocol, "host", mcproto.CleanHost(hs.Host), "backend", b.Name)
+	}
 
+	if hs.Intent == mcproto.IntentStatus && menu {
+		go g.refreshAll(wire.Open{Src: addrPort(c.RemoteAddr()), Dst: addrPort(c.LocalAddr())}, hs.Protocol, time.Second)
+		g.answerStatus(c, rd, func() any { return g.menuStatus(hs.Protocol) }, nil)
+		return
+	}
 	if hs.Intent == mcproto.IntentStatus {
 		if b.Session.Connected() {
 			c.SetReadDeadline(time.Time{})
 			g.addStream(b, &replayConn{Conn: c, prefix: rd.Raw()}, "status", log)
 			return
 		}
-		g.answerStatus(c, b, rd, hs)
+		g.answerStatus(c, rd, func() any { return mcproto.NewStatus(motd(mc.MOTD, b), mc.VersionName, hs.Protocol) },
+			func() { g.statusAnswered(b) })
 		return
 	}
 
@@ -146,23 +167,34 @@ func (g *Gateway) handleMinecraft(c net.Conn, b *Backend) {
 		abortClose(c)
 		return
 	}
-	c.SetReadDeadline(time.Time{})
 	log = log.With("player", name)
+	raw := rd.Raw()
+	if menu && hs.Intent == mcproto.IntentTransfer {
+		if tb, prefix := g.menuArrival(c, rd, hs, body, log); tb != nil {
+			b, raw, menu = tb, prefix, false
+			log = log.With("backend", b.Name)
+		}
+	}
+	if menu {
+		g.serveMenu(c, rd, hs, body, log)
+		return
+	}
+	c.SetReadDeadline(time.Time{})
 
 	keepalive := hs.Protocol >= mcproto.Protocol47
 	limit := mc.MaxHold
 	if !keepalive {
 		limit = min(limit, mc.LegacyMaxHold)
 	}
-	hc := newHoldConn(c, rd.Raw())
+	hc := newHoldConn(c, raw)
 	st := g.addStream(b, hc, "login", log)
 	go g.hold(hc, st, b, keepalive, limit, log.With("stream", st.ID()))
 }
 
-// answerStatus serves the server list ping from the gateway while no relay
-// is connected: a status document with the configured MOTD and the client's
-// own protocol number (so the client shows no version mismatch), then Pong.
-func (g *Gateway) answerStatus(c net.Conn, b *Backend, rd *mcproto.Reader, hs mcproto.Handshake) {
+// answerStatus serves the server list ping from the gateway (while no relay
+// is connected, or for the menu): the status document doc returns, then
+// Pong. answered, if set, is called once the document is sent.
+func (g *Gateway) answerStatus(c net.Conn, rd *mcproto.Reader, doc func() any, answered func()) {
 	mc := g.cfg.Minecraft
 	defer gracefulClose(c)
 	c.SetDeadline(time.Now().Add(mc.SniffTimeout))
@@ -173,11 +205,12 @@ func (g *Gateway) answerStatus(c net.Conn, b *Backend, rd *mcproto.Reader, hs mc
 		}
 		switch {
 		case id == 0x00 && len(body) == 0:
-			doc := mcproto.NewStatus(motd(mc.MOTD, b), mc.VersionName, hs.Protocol)
-			if _, err := c.Write(mcproto.StatusResponse(doc)); err != nil {
+			if _, err := c.Write(mcproto.StatusResponse(doc())); err != nil {
 				return
 			}
-			g.statusAnswered(b)
+			if answered != nil {
+				answered()
+			}
 		case id == 0x01 && len(body) == 8:
 			c.Write(mcproto.AppendPacket(nil, 0x01, body))
 			return

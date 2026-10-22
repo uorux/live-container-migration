@@ -99,6 +99,7 @@ type player struct {
 	br    *bufio.Reader
 	sent  []byte
 	start time.Time
+	rd    *mcproto.Reader // packet reader over br, kept across calls (menu tests)
 }
 
 func (e *mcEnv) dial() *player {

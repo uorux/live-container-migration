@@ -326,6 +326,14 @@ func (r *Reader) Raw() []byte { return r.buf }
 // Buffered returns the bytes read but not yet parsed.
 func (r *Reader) Buffered() []byte { return r.buf[r.off:] }
 
+// Discard forgets the bytes of packets already returned, for a reader that
+// keeps reading a long-lived connection (Raw no longer starts at the
+// connection's first byte afterwards).
+func (r *Reader) Discard() {
+	r.buf = append(r.buf[:0], r.buf[r.off:]...)
+	r.off = 0
+}
+
 // Fill reads once more from the underlying reader.
 func (r *Reader) Fill() error {
 	if len(r.buf) > r.max+16 {

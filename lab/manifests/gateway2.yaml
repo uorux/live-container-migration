@@ -22,7 +22,8 @@ spec:
         # to "lobby"; an asleep on-demand LivePod is woken through the node's agent.
         command: ["/lcm/lcm-gateway", "-listen", ":25565", "-tunnel-listen", ":7000", "-admin-listen", ":8080", "-token-file", "/secret/token",
                   "-minecraft", "-backend", "fab", "-backends", "lobby", "-motd", "{backend} is starting, hang tight",
-                  "-wake-url", "http://$(HOST_IP):7790", "-wake-token-file", "/secret/wake"]
+                  "-menu", "-menu-title", "lcm lab", "-label", "fab=Fabric 1.21.10,lobby=Lobby (no LivePod)",
+                  "-wake-url", "http://192.168.100.11:7790,http://$(HOST_IP):7790", "-wake-token-file", "/secret/wake"]
         env: [{name: HOST_IP, valueFrom: {fieldRef: {fieldPath: status.hostIP}}}]
         ports: [{containerPort: 25565, name: mc}, {containerPort: 7000, name: tunnel}, {containerPort: 8080, name: admin}]
         readinessProbe: {httpGet: {path: /healthz, port: 8080}}

@@ -42,13 +42,15 @@ var closeResults = map[tunnel.CloseReason]string{
 // gwMetrics is the gateway's Prometheus registry. Labels are bounded: the
 // backend name and fixed enums, never a player or stream id.
 type gwMetrics struct {
-	reg        *metrics.Registry
-	connects   *metrics.Counter
-	outage     *metrics.Histogram
-	conns      *metrics.Counter
-	bytes      *metrics.Counter
-	statusResp *metrics.Counter
-	wakes      *metrics.Counter
+	reg           *metrics.Registry
+	connects      *metrics.Counter
+	outage        *metrics.Histogram
+	conns         *metrics.Counter
+	bytes         *metrics.Counter
+	statusResp    *metrics.Counter
+	wakes         *metrics.Counter
+	menu          *metrics.Counter
+	menuTransfers *metrics.Counter
 
 	mu        sync.Mutex // serialises syncCounters
 	lastBytes map[string][2]uint64
@@ -85,6 +87,13 @@ func newGWMetrics(g *Gateway, version string) *gwMetrics {
 		"Server list pings answered by the gateway itself (-minecraft, tunnel down).", "backend")
 	m.wakes = r.Counter("lcm_gateway_wakes_total",
 		"Wake requests for a backend whose relay wasn't connected when a player arrived (-wake-url), by result.", "backend", "result")
+	m.menu = r.Counter("lcm_gateway_menu_total",
+		"Server menu events (-menu): shown, and how players left it; unsupported = a client too old for it; arrived = a transferred player came back with a valid choice.", "result")
+	for _, res := range menuResults {
+		m.menu.Add(0, res)
+	}
+	m.menuTransfers = r.Counter("lcm_gateway_menu_transfers_total",
+		"Players the server menu transferred to a backend.", "backend")
 	return m
 }
 
@@ -102,6 +111,7 @@ func (m *gwMetrics) initBackend(name string) {
 	m.statusResp.Add(0, name)
 	m.wakes.Add(0, name, "ok")
 	m.wakes.Add(0, name, "error")
+	m.menuTransfers.Add(0, name)
 }
 
 // syncCounters copies the sessions' byte counters into the registry.

@@ -52,6 +52,11 @@ forwards uncompressed to an old source.
   each of two gateways, 1.24 s blackout, 0 disconnects, both tunnels resumed).
 - **Many servers behind one gateway:** `-minecraft -backend lobby -backends atm9,atm10`; players
   reach `atm10.<domain>`. Each relay sets `-backend <name>`.
+- **Server menu instead of a lobby:** add `-menu` (plus `-menu-title`, `-label atm9=All the Mods
+  9`). The main address then shows a picker (1.21.6+ clients) that wakes the chosen server and
+  transfers the player to it; pack hostnames keep working directly. See
+  [on-demand.md](on-demand.md) "Server menu". Metrics: `lcm_gateway_menu_total{result}` and
+  `lcm_gateway_menu_transfers_total{backend}`.
 - **On demand:** `spec.onDemand` on the LivePod plus `-wake-url`/`-wake-token-file` on the
   gateways; see [on-demand.md](on-demand.md) "Wake and idle stop". Give the pod a
   `terminationGracePeriodSeconds` longer than the world save.
