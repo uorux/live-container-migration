@@ -48,6 +48,7 @@ type gwMetrics struct {
 	conns      *metrics.Counter
 	bytes      *metrics.Counter
 	statusResp *metrics.Counter
+	wakes      *metrics.Counter
 
 	mu        sync.Mutex // serialises syncCounters
 	lastBytes map[string][2]uint64
@@ -82,6 +83,8 @@ func newGWMetrics(g *Gateway, version string) *gwMetrics {
 		[]string{"backend"}, g.perBackend(func(b *Backend, s tunnel.Stats) float64 { return float64(s.TxBuffered + s.RxQueued) }))
 	m.statusResp = r.Counter("lcm_gateway_status_answered_total",
 		"Server list pings answered by the gateway itself (-minecraft, tunnel down).", "backend")
+	m.wakes = r.Counter("lcm_gateway_wakes_total",
+		"Wake requests for a backend whose relay wasn't connected when a player arrived (-wake-url), by result.", "backend", "result")
 	return m
 }
 
@@ -97,6 +100,8 @@ func (m *gwMetrics) initBackend(name string) {
 	m.bytes.Add(0, name, "to_server")
 	m.bytes.Add(0, name, "to_player")
 	m.statusResp.Add(0, name)
+	m.wakes.Add(0, name, "ok")
+	m.wakes.Add(0, name, "error")
 }
 
 // syncCounters copies the sessions' byte counters into the registry.

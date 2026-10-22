@@ -100,6 +100,15 @@ in
       type = types.str;
       default = "/etc/rancher/k3s/k3s.yaml";
     };
+    wakeTokenFile = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      description = ''
+        Optional file with a token that may only call POST /v1/wake/{backend} (waking an
+        on-demand LivePod). Give it to gateways outside the cluster (lcm-gateway -wake-url
+        -wake-token-file) instead of the agent token. Needs livePods.enable.
+      '';
+    };
     logShipping.victoriaLogsUrl = mkOption {
       type = types.nullOr types.str;
       default = null;
@@ -203,6 +212,8 @@ in
       } // lib.optionalAttrs cfg.livePods.enable {
         LCM_LIVEPODS = "1";
         LCM_KUBECONFIG = cfg.livePods.kubeconfig;
+      } // lib.optionalAttrs (cfg.wakeTokenFile != null) {
+        LCM_WAKE_TOKEN_FILE = cfg.wakeTokenFile;
       };
       serviceConfig = {
         ExecStart = "${cfg.package}/bin/lcm-agent serve -listen ${cfg.listenAddress}:${toString cfg.port} -token-file ${cfg.tokenFile}";

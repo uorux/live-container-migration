@@ -30,6 +30,14 @@ spec:
                 type: object
                 description: A pod template (metadata + spec). Use runtimeClassName lcm.
                 x-kubernetes-preserve-unknown-fields: true
+              onDemand:
+                type: object
+                description: >-
+                  Stop the pod when no player has been connected for idleAfter, and start it again
+                  when a gateway asks (a player arrives for backend). Gateways hold players while it boots.
+                properties:
+                  backend: {type: string, description: "gateway backend name (default: the LivePod's name)"}
+                  idleAfter: {type: string, description: "Go duration, default 10m"}
           status:
             type: object
             properties:
@@ -37,3 +45,4 @@ spec:
               node: {type: string}
               phase: {type: string}
               pods: {type: integer}
+              asleep: {type: boolean}

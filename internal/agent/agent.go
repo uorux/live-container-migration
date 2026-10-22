@@ -24,6 +24,9 @@
 //	GET    /v1/migrations[?n=50]          migration history reported to this agent
 //	POST   /v1/pull                       pull images ({"images": [...]}) into containerd ahead of a restore
 //	GET    /v1/info                       this node's addresses (for picking a transfer network)
+//	GET    /v1/relay?container=ID         player connections carried by the container's lcm-relay
+//	POST   /v1/wake/{backend}             wake the on-demand LivePod(s) for a gateway backend
+//	                                      (agent token, or the wake-only token)
 //	GET    /metrics                       Prometheus metrics (unauthenticated)
 //	GET    /healthz
 package agent
@@ -65,6 +68,8 @@ type Agent struct {
 	migrations map[string]bool          // in-flight checkpoints, by container id
 	status     map[string]*checkpointSt // by migration id, for GET /v1/checkpoint/{id}
 	tm         *telemetry
+	wakeToken  string
+	wake       WakeFunc
 }
 
 type checkpointSt struct {
@@ -114,6 +119,8 @@ func (a *Agent) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/report", a.auth(a.handleReport))
 	mux.HandleFunc("POST /v1/pull", a.auth(a.handlePull))
 	mux.HandleFunc("GET /v1/info", a.auth(a.handleInfo))
+	mux.HandleFunc("GET /v1/relay", a.auth(a.handleRelay))
+	mux.HandleFunc("POST /v1/wake/{backend}", a.handleWake)
 	mux.HandleFunc("GET /v1/migrations", a.auth(a.handleHistory))
 	mux.HandleFunc("POST /v1/checkpoint", a.auth(a.handleCheckpoint))
 	mux.HandleFunc("PUT /v1/stage/{key}/dir/{name}", a.auth(a.handlePutDir))

@@ -75,7 +75,7 @@ spec:
         summary: "lcm-agent versions differ across nodes"
         description: "Finish the rollout before migrating: a restore needs the same relay binary on every node."
     - alert: LcmLivePodNotRunning
-      expr: max by (namespace, livepod) (lcm_livepod_running{phase!="Paused"}) == 0
+      expr: max by (namespace, livepod) (lcm_livepod_running{phase!~"Paused|Asleep|Sleeping"}) == 0
       for: 10m
       labels: {severity: critical}
       annotations:

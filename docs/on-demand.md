@@ -303,8 +303,9 @@ so `lcm-runc` restores on create.
 
 ### Implementation status (2026-10-22)
 
-The gateway hold (phase 1) and the relay readiness gate (phase 2) are implemented; the lifecycle
-(phase 3+) is not. Code: [internal/mcproto](../internal/mcproto) (VarInt, framing, handshake,
+The gateway hold (phase 1), the relay readiness gate (phase 2), wake/idle stop (phase 3, built on
+LivePods rather than in the gateway; see "Wake and idle stop" below) and hostname routing (phase 4)
+are implemented. Code: [internal/mcproto](../internal/mcproto) (VarInt, framing, handshake,
 status, Login Disconnect, legacy ping), [internal/gateway/minecraft.go](../internal/gateway/minecraft.go),
 `waitReady` in [internal/relay/relay.go](../internal/relay/relay.go).
 
@@ -357,6 +358,37 @@ quiesce mid-stream gets no injection while a new login during the outage is held
 Disconnect; 1.7.x; garbage and legacy ping; `-minecraft` off stays L4),
 `internal/relay/ready_test.go` (gate, no re-probe after passing, quiesce while waiting). Not yet
 done: the e2e run with a real client (HeadlessMC) against the gateway binary.
+
+#### Wake and idle stop (phase 3, as built)
+
+An on-demand LivePod (`spec.onDemand: {backend: atm10, idleAfter: 10m}`) replaces AutoServer:
+
+- **Idle:** the LivePod controller (leader in lcm-agent) asks the pod's lcm-relay, through its node's
+  agent (`GET /v1/relay?container=`), how many player connections it carries over *all* gateways
+  (one per ingress). After `idleAfter` with none (and no migration holding the LivePod) it sets
+  `status.asleep` and deletes the pod; the server gets SIGTERM and its
+  `terminationGracePeriodSeconds` to save. An unanswered query counts as busy.
+- **Wake:** a gateway started with `-wake-url http://<agent>:7790[,…] -wake-token-file F` that gets a
+  login (or, in L4 mode, any connection) for a backend whose relay isn't connected calls
+  `POST /v1/wake/<backend>` (at most every 15 s per backend), holds the player, and the controller
+  creates the pod once any old one is fully gone. Server-list pings don't wake (like AutoServer) and
+  get the `-motd` (`{backend} is starting…`). Gateways outside the cluster use the agents' wake-only
+  token (`services.lcm.wakeTokenFile`), which can't call anything else.
+- Status: `kubectl get livepod` shows phase `Asleep` / `Sleeping` / `Waking`; metrics
+  `lcm_livepod_running{phase}` and `lcm_gateway_wakes_total{backend,result}`;
+  `LcmLivePodNotRunning` ignores asleep LivePods.
+
+Lab (Fabric 1.21.10, idleAfter 1m): asleep 1 min after the last player left, world saved
+("All dimensions are saved"); a login while asleep was held (one keepalive) and got Login Success
+after 18.4 s of cold boot; 3 bots kept it awake for 75 s, including a migration (1.18 s blackout,
+0 disconnects).
+
+#### Hostname routing (phase 4, as built)
+
+`lcm-gateway -minecraft -backend lobby -backends atm9,atm10,…` serves many servers from one
+listener: `<backend>.<any domain>` goes to that backend (the forced-hosts scheme), `-route
+host=backend` adds exact names, anything else goes to `-backend`. Forge markers, case and a
+trailing dot are ignored. Each server's relay presents its name (`lcm-relay -backend atm10`).
 
 | Phase | Work | Reuses | Done when |
 |---|---|---|---|

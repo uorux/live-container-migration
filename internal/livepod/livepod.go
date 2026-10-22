@@ -45,9 +45,16 @@ type Controller struct {
 	Log      *slog.Logger
 	Interval time.Duration
 
+	// Token and AgentPort reach the nodes' agents (player counts for on-demand LivePods).
+	Token     string
+	AgentPort int
+	// Players overrides how a pod's player count is read (tests).
+	Players func(ctx context.Context, p *corev1.Pod) (int, error)
+
 	mu      sync.Mutex
 	leading bool
-	state   map[string]Status // namespace/name -> last reconciled status (leader only)
+	state   map[string]Status    // namespace/name -> last reconciled status (leader only)
+	active  map[string]time.Time // on-demand: when each LivePod last had players
 }
 
 // Status is what the controller last saw for one LivePod.
@@ -157,16 +164,42 @@ func (c *Controller) reconcile(ctx context.Context, lp *unstructured.Unstructure
 			current = p
 		}
 	}
+	key := ns + "/" + name
+	od, onDemand := onDemandSpec(lp)
 	if current != nil {
-		return c.setStatus(ctx, lp, current.Name, current.Spec.NodeName, string(current.Status.Phase), len(pods.Items))
+		phase, asleep := string(current.Status.Phase), false
+		switch {
+		case current.DeletionTimestamp != nil && statusAsleep(lp):
+			phase, asleep = "Sleeping", true // stopping for idleness; stays asleep once gone
+		case onDemand && current.Status.Phase == corev1.PodRunning && ready(current) && current.DeletionTimestamp == nil && len(pods.Items) == 1:
+			if c.idle(ctx, key, current, od) {
+				if held, err := controller.LivePodHeld(ctx, c.Kube, ns, name); held || err != nil {
+					break
+				}
+				c.Log.Info("livepod: no players; stopping until someone joins", "namespace", ns, "livepod", name, "pod", current.Name, "idle", od.idleAfter)
+				if err := c.setStatus(ctx, lp, current.Name, current.Spec.NodeName, "Sleeping", len(pods.Items), true); err != nil {
+					return err
+				}
+				if err := c.Kube.CoreV1().Pods(ns).Delete(ctx, current.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+					return fmt.Errorf("stopping idle pod: %w", err)
+				}
+				return nil
+			}
+		default:
+			c.touch(key) // booting, migrating or not on demand: not idle
+		}
+		return c.setStatus(ctx, lp, current.Name, current.Spec.NodeName, phase, len(pods.Items), asleep)
 	}
 	if lp.GetAnnotations()[PausedAnnotation] == "true" {
-		return c.setStatus(ctx, lp, "", "", "Paused", 0)
+		return c.setStatus(ctx, lp, "", "", "Paused", 0, false)
+	}
+	if onDemand && statusAsleep(lp) {
+		return c.setStatus(ctx, lp, "", "", "Asleep", 0, true)
 	}
 	// A migration's rollback deletes the dead source before creating the restore pod; it holds
 	// a Lease meanwhile so no cold copy is started next to the one being restored.
 	if held, err := controller.LivePodHeld(ctx, c.Kube, ns, name); held || err != nil {
-		return c.setStatus(ctx, lp, "", "", "Migrating", 0)
+		return c.setStatus(ctx, lp, "", "", "Migrating", 0, false)
 	}
 	pod, err := podFromTemplate(lp)
 	if err != nil {
@@ -177,7 +210,8 @@ func (c *Controller) reconcile(ctx context.Context, lp *unstructured.Unstructure
 		return fmt.Errorf("creating pod: %w", err)
 	}
 	c.Log.Info("livepod: created pod (no pod existed)", "namespace", ns, "livepod", name, "pod", created.Name)
-	return c.setStatus(ctx, lp, created.Name, "", "Created", 1)
+	c.touch(key)
+	return c.setStatus(ctx, lp, created.Name, "", "Created", 1, false)
 }
 
 // staleAfter is how long a migrated-away source may linger after its successor is ready before
@@ -256,7 +290,7 @@ func podFromTemplate(lp *unstructured.Unstructured) (*corev1.Pod, error) {
 	return pod, nil
 }
 
-func (c *Controller) setStatus(ctx context.Context, lp *unstructured.Unstructured, pod, node, phase string, pods int) error {
+func (c *Controller) setStatus(ctx context.Context, lp *unstructured.Unstructured, pod, node, phase string, pods int, asleep bool) error {
 	c.mu.Lock()
 	if c.state == nil {
 		c.state = map[string]Status{}
@@ -264,7 +298,7 @@ func (c *Controller) setStatus(ctx context.Context, lp *unstructured.Unstructure
 	c.state[lp.GetNamespace()+"/"+lp.GetName()] = Status{lp.GetNamespace(), lp.GetName(), pod, node, phase}
 	c.mu.Unlock()
 	cur, _, _ := unstructured.NestedMap(lp.Object, "status")
-	want := map[string]any{"pod": pod, "node": node, "phase": phase, "pods": int64(pods)}
+	want := map[string]any{"pod": pod, "node": node, "phase": phase, "pods": int64(pods), "asleep": asleep}
 	same := cur != nil
 	for k, v := range want {
 		if cur[k] != v {

@@ -10,6 +10,9 @@ metadata:
   name: survival
   namespace: games
 spec:
+  # Optional: stop after 10 minutes without players; a gateway with -wake-url starts it again
+  # when someone joins (and holds them while it boots). Players reach it as survival.<domain>.
+  onDemand: {backend: survival, idleAfter: 10m}
   template:
     metadata:
       labels: {app: survival}
@@ -27,7 +30,7 @@ spec:
         image: itzg/minecraft-server:java21
         # Modded/vanilla: -proxy-protocol=false. Paper with proxies.proxy-protocol=true: drop it to
         # keep real client IPs.
-        command: ["/lcm/lcm-relay", "run", "-gateway", "lcm-gateway-tunnel.games.svc.cluster.local:7000",
+        command: ["/lcm/lcm-relay", "run", "-gateway", "lcm-gateway-tunnel.games.svc.cluster.local:7000", "-backend", "survival",
                   "-token-file", "/secret/token", "-proxy-protocol=false", "-minecraft-ready", "--", "/start"]
         env:
         - {name: EULA, value: "TRUE"}

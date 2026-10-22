@@ -21,33 +21,44 @@ const RelaySocket = "/run/lcm/relay.sock"
 // The connection is closed before returning: a connected unix socket into the container would be
 // an external resource CRIU refuses to dump.
 func Command(pid int, cmd string, timeout time.Duration) error {
+	line, err := Query(pid, cmd, timeout)
+	if err != nil {
+		return err
+	}
+	if line != "ok" {
+		return fmt.Errorf("relay %s: %s", cmd, line)
+	}
+	return nil
+}
+
+// Query sends cmd to the relay in pid's container and returns its reply line (for quiesce,
+// after the relay closed the socket).
+func Query(pid int, cmd string, timeout time.Duration) (string, error) {
 	path := "/proc/" + strconv.Itoa(pid) + "/root" + RelaySocket
 	if _, err := os.Stat(path); err != nil {
-		return err
+		return "", err
 	}
 	conn, err := net.DialTimeout("unix", path, 2*time.Second)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer conn.Close()
 	conn.SetDeadline(time.Now().Add(timeout))
 	if _, err := fmt.Fprintf(conn, "%s\n", cmd); err != nil {
-		return err
+		return "", err
 	}
 	br := bufio.NewReader(conn)
 	line, err := br.ReadString('\n')
 	if err != nil {
-		return fmt.Errorf("relay %s: %w", cmd, err)
+		return "", fmt.Errorf("relay %s: %w", cmd, err)
 	}
-	if line = strings.TrimSpace(line); line != "ok" {
-		return fmt.Errorf("relay %s: %s", cmd, line)
-	}
-	if cmd == "quiesce" {
+	line = strings.TrimSpace(line)
+	if cmd == "quiesce" && line == "ok" {
 		// The relay closes its end after quiescing; EOF means its fd is gone too, so the dump
 		// won't see a connected unix socket pointing outside the container.
 		if _, err := br.ReadByte(); err == nil {
-			return fmt.Errorf("relay quiesce: unexpected data after ok")
+			return "", fmt.Errorf("relay quiesce: unexpected data after ok")
 		}
 	}
-	return nil
+	return line, nil
 }

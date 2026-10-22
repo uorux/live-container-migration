@@ -475,3 +475,51 @@ func TestStagingPlainForLegacyReceiver(t *testing.T) {
 		t.Errorf("current agent: encoding %q, want zstd", enc)
 	}
 }
+
+func TestRelayPlayers(t *testing.T) {
+	for in, want := range map[string]int{
+		`{"session":"x","streams":3}`:                             3,
+		`{"ready":true,"gateways":[{"streams":2},{"streams":5}]}`: 7,
+		`{"session":"x","streams":0}`:                             0,
+	} {
+		if n, err := relayPlayers(in); err != nil || n != want {
+			t.Errorf("%s: %d %v, want %d", in, n, err, want)
+		}
+	}
+}
+
+// The wake-only token wakes backends and can do nothing else.
+func TestWakeToken(t *testing.T) {
+	t.Setenv("LCM_STATE_DIR", t.TempDir())
+	a := New(testToken, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	var woke []string
+	a.SetWake("wakeonly", func(_ context.Context, b string) ([]string, error) {
+		woke = append(woke, b)
+		if b == "atm10" {
+			return []string{"mc/atm10"}, nil
+		}
+		return nil, nil
+	})
+	srv := httptest.NewServer(a.Handler())
+	defer srv.Close()
+	for _, c := range []struct {
+		method, path, token string
+		want                int
+	}{
+		{"POST", "/v1/wake/atm10", "wakeonly", 200},
+		{"POST", "/v1/wake/atm10", testToken, 200},
+		{"POST", "/v1/wake/nope", "wakeonly", 404},
+		{"POST", "/v1/wake/atm10", "wrong", 401},
+		{"GET", "/v1/info", "wakeonly", 401},
+		{"DELETE", "/v1/stage/ns_p_c", "wakeonly", 401},
+	} {
+		resp := do(t, c.method, srv.URL+c.path, c.token, nil)
+		resp.Body.Close()
+		if resp.StatusCode != c.want {
+			t.Errorf("%s %s with %s: %d, want %d", c.method, c.path, c.token, resp.StatusCode, c.want)
+		}
+	}
+	if len(woke) != 3 {
+		t.Errorf("wake calls %v", woke)
+	}
+}

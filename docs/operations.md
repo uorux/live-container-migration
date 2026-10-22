@@ -43,6 +43,18 @@ converge can fill the destination's staging after the workload stopped (seen in 
 with `--allow-version-skew` for small workloads; restores across versions work, and a rollback
 forwards uncompressed to an old source.
 
+## Ingresses, routing and on-demand servers
+
+- **Several ingresses:** run an lcm-gateway next to each ingress (e.g. behind HAProxy:
+  `server gw 127.0.0.1:25566 send-proxy-v2`, gateway `-accept-proxy 127.0.0.1/32` so players keep
+  their addresses) and give each server's relay all of them: `lcm-relay -gateway a:7000,b:7000`.
+  Migrations quiesce and resume every tunnel; each gateway holds its own players.
+- **Many servers behind one gateway:** `-minecraft -backend lobby -backends atm9,atm10`; players
+  reach `atm10.<domain>`. Each relay sets `-backend <name>`.
+- **On demand:** `spec.onDemand` on the LivePod plus `-wake-url`/`-wake-token-file` on the
+  gateways; see [on-demand.md](on-demand.md) "Wake and idle stop". Give the pod a
+  `terminationGracePeriodSeconds` longer than the world save.
+
 ## Quick look
 
 ```sh

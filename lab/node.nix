@@ -23,8 +23,10 @@ in
       logShipping.victoriaLogsUrl = "http://127.0.0.1:30428";
       # Only the k3s server (node1) has the admin kubeconfig the LivePod controller uses.
       livePods.enable = cfg.role == "server";
+      wakeTokenFile = "/etc/lcm/wake-token";
     };
     environment.etc."lcm/token".text = "lab-token-not-secret"; # lab only: lands in the store
+    environment.etc."lcm/wake-token".text = "lab-wake-token-not-secret";
     system.stateVersion = "26.05";
     nixpkgs.overlays = [ (import ../nix/overlay.nix) ];
     # Lets me iterate with `nixos-rebuild switch --flake /lcm/lab#nodeN` inside the VM (builds land on the VM disk).

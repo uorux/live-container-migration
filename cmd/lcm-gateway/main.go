@@ -45,6 +45,8 @@ func main() {
 	holdMax := flag.Duration("hold-max", 5*time.Minute, "kick a held login with -hold-message after this long (-minecraft)")
 	holdMessage := flag.String("hold-message", "The server did not start in time. Please try again later.", "Login Disconnect text when -hold-max passes (-minecraft)")
 	acceptProxy := flag.String("accept-proxy", cliutil.EnvDefault("LCM_ACCEPT_PROXY", ""), "comma-separated CIDRs (e.g. 127.0.0.1/32 for a local HAProxy with send-proxy-v2) whose player connections start with a PROXY v2 header (env LCM_ACCEPT_PROXY)")
+	wakeURLs := flag.String("wake-url", cliutil.EnvDefault("LCM_WAKE_URL", ""), "lcm-agent base URLs (comma-separated, e.g. http://node:7790) to wake an on-demand backend when a player arrives and its relay isn't connected (env LCM_WAKE_URL)")
+	wakeTokenFile := flag.String("wake-token-file", cliutil.EnvDefault("LCM_WAKE_TOKEN_FILE", ""), "file with the agents' wake token (env LCM_WAKE_TOKEN_FILE)")
 	logLevel := flag.String("log-level", cliutil.EnvDefault("LCM_LOG_LEVEL", "info"), "debug|info|warn|error")
 	flag.Parse()
 
@@ -94,7 +96,24 @@ func main() {
 		fmt.Fprintln(os.Stderr, "lcm-gateway: routing to several backends needs -minecraft (it reads the handshake's hostname)")
 		os.Exit(2)
 	}
+	var wake func(context.Context, string) error
+	if *wakeURLs != "" {
+		var urls []string
+		for _, u := range strings.Split(*wakeURLs, ",") {
+			if u = strings.TrimSpace(u); u != "" {
+				urls = append(urls, u)
+			}
+		}
+		b, err := os.ReadFile(*wakeTokenFile)
+		wt := strings.TrimSpace(string(b))
+		if err != nil || wt == "" {
+			fmt.Fprintln(os.Stderr, "lcm-gateway: -wake-url needs a readable, non-empty -wake-token-file")
+			os.Exit(2)
+		}
+		wake = gateway.HTTPWaker(urls, wt)
+	}
 	g := gateway.New(gateway.Config{
+		Wake:        wake,
 		AcceptProxy: trusted,
 		Backends:    extra,
 		Routes:      routeMap,

@@ -8,9 +8,11 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -37,6 +39,7 @@ func main() {
 	vlogs := fs.String("victorialogs-url", os.Getenv("LCM_VICTORIALOGS_URL"), "ship logs (agent + lcm-runc) to this VictoriaLogs base URL")
 	livePods := fs.Bool("livepods", os.Getenv("LCM_LIVEPODS") == "1", "run the LivePod controller (leader-elected across agents)")
 	kubeconfig := fs.String("kubeconfig", os.Getenv("LCM_KUBECONFIG"), "kubeconfig for the LivePod controller")
+	wakeTokenFile := fs.String("wake-token-file", os.Getenv("LCM_WAKE_TOKEN_FILE"), "optional token that may only call POST /v1/wake (for gateways outside the cluster)")
 	binDir := fs.String("bin-dir", os.Getenv("LCM_BIN_DIR"), "directory with lcm-relay/lcm-gateway to serve to init containers")
 	fs.Parse(os.Args[2:])
 
@@ -62,14 +65,25 @@ func main() {
 		a.ExportLogShipping(shipper.Sent.Load, shipper.Dropped.Load)
 	}
 	go a.GC(context.Background(), 14*24*time.Hour)
+	wakeToken := ""
+	if *wakeTokenFile != "" {
+		b, err := os.ReadFile(*wakeTokenFile)
+		if wakeToken = strings.TrimSpace(string(b)); err != nil || wakeToken == "" {
+			log.Error("-wake-token-file is unreadable or empty", "err", err)
+			os.Exit(1)
+		}
+		a.SetWake(wakeToken, nil) // 503 unless this agent runs the LivePod controller (below)
+	}
 	if *livePods {
 		cfg, err := clientcmd.BuildConfigFromFlags("", *kubeconfig)
 		if err != nil {
 			log.Error("livepods: kubeconfig", "err", err)
 			os.Exit(1)
 		}
-		lc := &livepod.Controller{Kube: kubernetes.NewForConfigOrDie(cfg), Dyn: dynamic.NewForConfigOrDie(cfg), Log: log}
+		lc := &livepod.Controller{Kube: kubernetes.NewForConfigOrDie(cfg), Dyn: dynamic.NewForConfigOrDie(cfg), Log: log,
+			Token: token, AgentPort: listenPort(*listen)}
 		go lc.Run(context.Background(), livepod.Identity())
+		a.SetWake(wakeToken, lc.Wake)
 		reg := a.Metrics()
 		reg.GaugeFunc("lcm_livepod_controller_leader", "1 on the agent whose LivePod controller currently leads.", nil, func() []metrics.Sample {
 			if leading, _ := lc.Snapshot(); leading {
@@ -77,7 +91,7 @@ func main() {
 			}
 			return []metrics.Sample{{Value: 0}}
 		})
-		reg.GaugeFunc("lcm_livepod_running", "Per LivePod (reported by the leading controller): 1 if its pod is Running, else 0.", []string{"namespace", "livepod", "node", "phase"}, func() []metrics.Sample {
+		reg.GaugeFunc("lcm_livepod_running", "Per LivePod (reported by the leading controller): 1 if its pod is Running, else 0 (phase Asleep/Sleeping: an idle on-demand LivePod).", []string{"namespace", "livepod", "node", "phase"}, func() []metrics.Sample {
 			_, st := lc.Snapshot()
 			out := make([]metrics.Sample, 0, len(st))
 			for _, s := range st {
@@ -99,4 +113,16 @@ func main() {
 		log.Error("serve", "err", err)
 		os.Exit(1)
 	}
+}
+
+func listenPort(addr string) int {
+	_, p, err := net.SplitHostPort(addr)
+	if err != nil {
+		return api.DefaultPort
+	}
+	n, err := strconv.Atoi(p)
+	if err != nil {
+		return api.DefaultPort
+	}
+	return n
 }

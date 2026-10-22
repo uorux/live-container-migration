@@ -458,3 +458,70 @@ func TestRouteByHostname(t *testing.T) {
 		p.c.Close()
 	}
 }
+
+func TestWakeOnLogin(t *testing.T) {
+	woke := make(chan string, 8)
+	gw := New(Config{Tunnel: testTunnelCfg(), Logger: testLogger(), Minecraft: &MinecraftConfig{HoldInterval: testInterval},
+		Backend: "lobby", Backends: []string{"atm10"}, WakeEvery: time.Minute,
+		Wake: func(_ context.Context, b string) error { woke <- b; return nil }})
+	pl, _ := Listen(context.Background(), "127.0.0.1:0")
+	tl, _ := Listen(context.Background(), "127.0.0.1:0")
+	go gw.ServePlayers(pl, gw.DefaultBackend())
+	go gw.ServeTunnel(tl)
+	defer pl.Close()
+	defer tl.Close()
+	e := &mcEnv{t: t, gw: gw, playerAddr: pl.Addr().String(), tunnelAddr: tl.Addr().String()}
+
+	// A server-list ping doesn't wake anything.
+	sp := e.dial()
+	sp.c.Write(mcproto.AppendHandshake(nil, mcproto.Handshake{Protocol: 767, Host: "atm10.mc.test", Port: 25565, Intent: mcproto.IntentStatus}))
+	sp.c.Write([]byte{1, 0}) // status request
+	sp.c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	sp.br.ReadByte()
+	select {
+	case b := <-woke:
+		t.Fatalf("status ping woke %s", b)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Two logins: one wake (debounced), and both are held.
+	login := func() *player {
+		p := e.dial()
+		p.sent = mcproto.AppendLoginStart(mcproto.AppendHandshake(nil, mcproto.Handshake{Protocol: 767, Host: "atm10.mc.test", Port: 25565, Intent: mcproto.IntentLogin}), "alex")
+		p.c.Write(p.sent)
+		return p
+	}
+	p1, p2 := login(), login()
+	select {
+	case b := <-woke:
+		if b != "atm10" {
+			t.Fatalf("woke %s", b)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no wake")
+	}
+	p1.keepalives(1, testInterval)
+	p2.keepalives(1, testInterval)
+	select {
+	case b := <-woke:
+		t.Fatalf("second wake for %s within WakeEvery", b)
+	default:
+	}
+
+	// The server comes up: the held login reaches it.
+	s := e.startServer(true)
+	r := relay.New(relay.Config{Gateway: e.tunnelAddr, Backend: "atm10", Upstream: s.Addr(), ProxyProtocol: true,
+		Tunnel: testTunnelCfg(), BackoffMin: 20 * time.Millisecond, BackoffMax: 100 * time.Millisecond, Logger: testLogger()})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { r.Run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+	select {
+	case l := <-s.Logins:
+		if l.Name != "alex" {
+			t.Fatalf("login %q", l.Name)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("held login never reached the woken server")
+	}
+}

@@ -136,3 +136,74 @@ func TestKeepsSourceDuringMigration(t *testing.T) {
 		}
 	}
 }
+
+func setupOnDemand(players *int, objs ...runtime.Object) (*Controller, *fake.Clientset) {
+	lp := newLivePod()
+	unstructured.SetNestedMap(lp.Object, map[string]any{"idleAfter": "20ms", "backend": "fabric"}, "spec", "onDemand")
+	kc := fake.NewSimpleClientset(objs...)
+	dyn := dynfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{GVR: "LivePodList"}, lp)
+	c := &Controller{Kube: kc, Dyn: dyn, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Players: func(context.Context, *corev1.Pod) (int, error) { return *players, nil }}
+	return c, kc
+}
+
+func livePodStatus(t *testing.T, c *Controller) map[string]any {
+	lp, err := c.Dyn.Resource(GVR).Namespace("ns").Get(context.Background(), "fab", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, _, _ := unstructured.NestedMap(lp.Object, "status")
+	return st
+}
+
+func TestOnDemandSleepsWhenIdleAndWakes(t *testing.T) {
+	ctx := context.Background()
+	players := 1
+	c, kc := setupOnDemand(&players, podWithReady("fab-a", "", true, time.Now()))
+	c.reconcileAll(ctx)
+	time.Sleep(30 * time.Millisecond)
+	c.reconcileAll(ctx)
+	if podCount(t, kc) != 1 {
+		t.Fatal("stopped while players were on")
+	}
+	players = 0
+	c.reconcileAll(ctx) // idle timer starts
+	time.Sleep(30 * time.Millisecond)
+	c.reconcileAll(ctx) // idle long enough: stop
+	if n := podCount(t, kc); n != 0 {
+		t.Fatalf("idle pod not stopped (%d pods)", n)
+	}
+	c.reconcileAll(ctx)
+	if n := podCount(t, kc); n != 0 {
+		t.Fatalf("a pod was created while asleep (%d pods)", n)
+	}
+	if st := livePodStatus(t, c); st["asleep"] != true || st["phase"] != "Asleep" {
+		t.Fatalf("status %v", st)
+	}
+	if names, err := c.Wake(ctx, "fabric"); err != nil || len(names) != 1 {
+		t.Fatalf("wake: %v %v", names, err)
+	}
+	if names, _ := c.Wake(ctx, "other"); len(names) != 0 {
+		t.Fatalf("woke an unrelated backend: %v", names)
+	}
+	c.reconcileAll(ctx)
+	if n := podCount(t, kc); n != 1 {
+		t.Fatalf("not woken (%d pods)", n)
+	}
+}
+
+func TestOnDemandNotStoppedDuringMigration(t *testing.T) {
+	ctx := context.Background()
+	players := 0
+	lease := &coordv1.Lease{ObjectMeta: metav1.ObjectMeta{Name: controller.HoldLeaseName("fab"), Namespace: "ns"},
+		Spec: coordv1.LeaseSpec{RenewTime: &metav1.MicroTime{Time: time.Now()}, LeaseDurationSeconds: ptr(int32(600))}}
+	c, kc := setupOnDemand(&players, podWithReady("fab-a", "", true, time.Now()), lease)
+	c.reconcileAll(ctx)
+	time.Sleep(30 * time.Millisecond)
+	c.reconcileAll(ctx)
+	if podCount(t, kc) != 1 {
+		t.Fatal("stopped while a migration held the LivePod")
+	}
+}
+
+func ptr[T any](v T) *T { return &v }

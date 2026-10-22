@@ -46,7 +46,12 @@ type Config struct {
 	// whose connections start with a PROXY v2 header carrying the player's
 	// real address. Connections from other sources are taken as direct.
 	AcceptProxy []netip.Prefix
-	Logger      *slog.Logger
+	// Wake, if set, is called (at most every WakeEvery per backend) when a
+	// player arrives for a backend whose relay isn't connected: an on-demand
+	// server that is asleep. The player is held meanwhile.
+	Wake      func(ctx context.Context, backend string) error
+	WakeEvery time.Duration
+	Logger    *slog.Logger
 	// Version is reported by lcm_gateway_build_info and /status ("dev" if empty).
 	Version string
 }
@@ -56,6 +61,8 @@ type Backend struct {
 	Name    string
 	Session *tunnel.Session
 	held    atomic.Int64 // login streams currently held (Minecraft mode)
+	// lastWake is when Wake was last called for this backend (unix nanos).
+	lastWake atomic.Int64
 	// statusAnswered counts status pings the gateway answered itself.
 	statusAnswered atomic.Uint64
 }
@@ -238,8 +245,38 @@ func (g *Gateway) addStream(b *Backend, c net.Conn, kind string, log *slog.Logge
 	open := wire.Open{Src: addrPort(c.RemoteAddr()), Dst: addrPort(c.LocalAddr())}
 	st := b.Session.AddStream(c, open)
 	g.metrics.conns.Inc(b.Name, resultOpened)
+	if kind == "login" || kind == "l4" {
+		g.maybeWake(b)
+	}
 	log.Info("player connected", "stream", st.ID(), "kind", kind, "tunnel_up", b.Session.Connected())
 	return st
+}
+
+// maybeWake asks for an asleep backend to be started (see Config.Wake).
+func (g *Gateway) maybeWake(b *Backend) {
+	if g.cfg.Wake == nil || b.Session.Connected() {
+		return
+	}
+	every := g.cfg.WakeEvery
+	if every <= 0 {
+		every = 15 * time.Second
+	}
+	now := time.Now().UnixNano()
+	last := b.lastWake.Load()
+	if now-last < int64(every) || !b.lastWake.CompareAndSwap(last, now) {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := g.cfg.Wake(ctx, b.Name); err != nil {
+			g.metrics.wakes.Inc(b.Name, "error")
+			g.log.Warn("waking backend", "backend", b.Name, "err", err)
+			return
+		}
+		g.metrics.wakes.Inc(b.Name, "ok")
+		g.log.Info("woke backend", "backend", b.Name)
+	}()
 }
 
 func addrPort(a net.Addr) netip.AddrPort {

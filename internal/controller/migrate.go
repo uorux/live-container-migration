@@ -751,3 +751,8 @@ func human(n int64) string {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+// AgentURL is the lcm-agent address on node (its InternalIP).
+func AgentURL(ctx context.Context, kc kubernetes.Interface, node string, port int) (string, error) {
+	return agentURL(ctx, kc, node, port)
+}
