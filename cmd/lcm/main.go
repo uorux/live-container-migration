@@ -25,7 +25,7 @@ import (
 )
 
 func main() {
-	usage := "usage: lcm migrate <pod> --to <node> [flags]\n       lcm status | lcm history [-limit N]\n       lcm recover <template-pod> --to <node> --images-on <node> --key <key>"
+	usage := "usage: lcm migrate <pod>|livepod/<name> --to <node> [flags]\n       lcm status | lcm history [-limit N]\n       lcm recover <template-pod> --to <node> --images-on <node> --key <key>"
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(2)

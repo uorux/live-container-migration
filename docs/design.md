@@ -29,7 +29,8 @@ containerd's runc shim already knows how to restore (it runs `runc restore` when
 with a checkpoint); we just get there from the runtime side instead of the CRI side:
 
 - The destination pod is created ahead of time with `runtimeClassName: lcm` and an init container
-  that blocks until the checkpoint has landed on the destination node. The pod sandbox (netns,
+  that blocks until the final dump is about to happen (the source marks the staging `FINAL`;
+  `lcm-runc create` then waits for `READY`, so kubelet's container start-up overlaps the dump). The pod sandbox (netns,
   Cilium endpoint, IP), image pull and volume mounts all happen *before* the freeze.
 - When kubelet then creates the main container, `lcm-runc create` sees a pending restore for this
   `<namespace>/<pod>/<container>` and runs `runc restore --detach` into the bundle containerd
