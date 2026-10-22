@@ -98,12 +98,39 @@ func (a *Agent) checkpoint(ctx context.Context, req api.CheckpointRequest, emit 
 	var warmEv *api.Event
 	go func() { defer close(warmDone); warmEv = warm(func(string) bool { return true }) }()
 
+	// FINAL tells the destination the final dump is near: its pod leaves the wait init container
+	// and kubelet starts the container (lcm-runc then waits for READY), so kubelet's start-up
+	// latency (~1 s) overlaps the end of pre-copy and the final dump instead of following them.
+	// It goes out before the pre-dump round expected to finish within finalLead, or at the latest
+	// right before the freeze.
+	finalSent := false
+	sendFinal := func() error {
+		if finalSent {
+			return nil
+		}
+		if err := os.WriteFile(filepath.Join(dir, "FINAL"), nil, 0o644); err != nil {
+			return err
+		}
+		if err := dst.putFile(ctx, filepath.Join(dir, "FINAL"), "FINAL"); err != nil {
+			return fmt.Errorf("signalling the destination: %w", err)
+		}
+		finalSent = true
+		return nil
+	}
+	anon, _ := containerAnon(ctx, req.ContainerID)
+
 	// Pre-copy rounds.
 	parent := ""
 	var prevBytes int64 = -1
+	var prevRate float64 // bytes/s of the previous round (dump + ship)
 	for round := 1; round <= req.PreDump.Max; round++ {
 		if err := ctx.Err(); err != nil {
 			return nil, fmt.Errorf("cancelled before pre-dump %d: %w", round, err)
+		}
+		if roundEstimate(round, anon, prevBytes, prevRate) <= finalLead {
+			if err := sendFinal(); err != nil {
+				return nil, err
+			}
 		}
 		name := fmt.Sprintf("pre-%d", round)
 		t0 := time.Now()
@@ -124,6 +151,9 @@ func (a *Agent) checkpoint(ctx context.Context, req api.CheckpointRequest, emit 
 		// skip pages that haven't changed), so free the page data: it's RAM on a tmpfs.
 		dropPages(filepath.Join(dir, name))
 		r := api.Round{DumpMS: dumpMS, ShipMS: since(t1), Bytes: size}
+		if ms := r.DumpMS + r.ShipMS; ms > 0 {
+			prevRate = float64(size) / (float64(ms) / 1000)
+		}
 		res.PreDumps = append(res.PreDumps, r)
 		emit(api.Event{Phase: "predump", Round: round, Bytes: size, Millis: r.DumpMS + r.ShipMS,
 			Message: fmt.Sprintf("dump %dms ship %dms", r.DumpMS, r.ShipMS)})
@@ -142,12 +172,8 @@ func (a *Agent) checkpoint(ctx context.Context, req api.CheckpointRequest, emit 
 			emit(*ev)
 		}
 	}
-	// Tell the destination the final dump is next: its pod leaves the wait init container now and
-	// kubelet starts the container (lcm-runc then waits for READY) while we dump and ship.
-	if err := os.WriteFile(filepath.Join(dir, "FINAL"), nil, 0o644); err == nil {
-		if err := dst.putFile(ctx, filepath.Join(dir, "FINAL"), "FINAL"); err != nil {
-			return nil, fmt.Errorf("signalling the destination: %w", err)
-		}
+	if err := sendFinal(); err != nil {
+		return nil, err
 	}
 	if req.Relay != "off" {
 		switch err := relayctl.Command(st.Pid, "quiesce", 10*time.Second); {
@@ -287,6 +313,25 @@ func (a *Agent) finish(ctx context.Context, req api.CheckpointRequest, dir, uppe
 	}
 	emit(api.Event{Phase: "ready", Millis: res.FrozenMS, Message: "destination staged"})
 	return res, nil
+}
+
+// finalLead: FINAL goes out before a pre-dump round expected to take at most this long (plus the
+// final dump). lcm-runc waits up to 100 s for READY, so a misestimate has a wide margin.
+const finalLead = 10 * time.Second
+
+// roundEstimate guesses how long pre-dump round `round` plus the final dump will take: the
+// previous round's size at its throughput (rounds shrink as they converge), or for the first
+// round the container's anonymous memory at a conservative 50 MB/s. Unknown means "long".
+func roundEstimate(round int, anon, prevBytes int64, prevRate float64) time.Duration {
+	const finalMargin = 2 * time.Second
+	size, rate := prevBytes, prevRate
+	if round == 1 {
+		size, rate = anon, 50e6
+	}
+	if size < 0 || rate <= 0 {
+		return time.Hour
+	}
+	return time.Duration(float64(size)/rate*float64(time.Second)) + finalMargin
 }
 
 // persisted is what the agent keeps on disk about an in-flight checkpoint, so a restarted agent

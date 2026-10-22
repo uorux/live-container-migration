@@ -131,8 +131,9 @@ func main() {
 }
 
 // pendingTimeout bounds how long create waits for a final checkpoint that is being dumped and
-// shipped; well under the CRI runtime request timeout (2 min).
-const pendingTimeout = 75 * time.Second
+// shipped (FINAL is sent up to ~10 s of estimated work early); under the CRI runtime request
+// timeout (2 min).
+const pendingTimeout = 100 * time.Second
 
 func create(inv invocation) {
 	c := parseCreate(inv.args)

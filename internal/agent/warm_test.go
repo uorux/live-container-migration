@@ -56,3 +56,24 @@ func TestSharedFilesAndWarm(t *testing.T) {
 		t.Fatalf("warm = %+v, want 1 opened, 5 refused", res)
 	}
 }
+
+func TestRoundEstimate(t *testing.T) {
+	const mb = 1 << 20
+	for _, tc := range []struct {
+		round           int
+		anon, prev      int64
+		rate            float64
+		sendBeforeRound bool
+	}{
+		{1, 6 * mb, -1, 0, true},               // tiny workload: FINAL right away
+		{1, 1500 * mb, -1, 0, false},           // 1.5 GB at 50 MB/s: too long
+		{1, -1, -1, 0, false},                  // unknown size
+		{2, 1500 * mb, 1550 * mb, 316e6, true}, // the last round took ~5 s
+		{2, 6000 * mb, 6000 * mb, 50e6, false}, // slow link, big heap
+	} {
+		got := roundEstimate(tc.round, tc.anon, tc.prev, tc.rate) <= finalLead
+		if got != tc.sendBeforeRound {
+			t.Errorf("%+v: send FINAL = %v, want %v", tc, got, tc.sendBeforeRound)
+		}
+	}
+}
