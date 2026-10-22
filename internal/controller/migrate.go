@@ -235,8 +235,12 @@ func Migrate(ctx context.Context, kc kubernetes.Interface, o Options) (*Result, 
 	}
 restored:
 	var rr api.RestoreResult
-	if b, err := agentDo(ctx, dstURL, o.Token, http.MethodGet, "/v1/stage/"+key+"/result", nil); err == nil {
-		if json.Unmarshal(b, &rr) == nil {
+	// The destination agent may be restarting; the result is only needed for the report.
+	for attempt := 0; attempt < 15 && res.Restore == nil; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Second)
+		}
+		if b, err := agentDo(ctx, dstURL, o.Token, http.MethodGet, "/v1/stage/"+key+"/result", nil); err == nil && json.Unmarshal(b, &rr) == nil {
 			res.Restore = &rr
 			res.Blackout = blackout(ck, &rr)
 		}

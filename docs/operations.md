@@ -82,7 +82,7 @@ the metric HELP text for the exact list.
 | anything (CRIU error, network, destination agent) | before the final dump | migration aborts; the source never stopped; the relay resumes; players see nothing |
 | the source `lcm-agent` restarts | before the final dump | its runc/CRIU keep running (`KillMode=process`); the restarted agent aborts the migration and lifts the fence; the CLI learns this by polling |
 | the source `lcm-agent` restarts | during/after the final dump | runc finishes the dump; the restarted agent ships it and marks the destination ready; the parked destination pod restores (tested in the lab with players connected: no disconnects) |
-| shipping fails | after the final dump | retried 4x; then the CLI reports where the images are (final dump on the source, pre-dumps on the destination) |
+| shipping fails | after the final dump | retried for 90 s (e.g. a destination agent restart); then the CLI reports where the images are (final dump on the source, pre-dumps on the destination) for `lcm recover` |
 | the restore fails on the destination | after shipping | the destination pod is fenced, the images are forwarded back, the workload is restored on the source node (~10-15 s freeze) |
 | the CLI dies / its connection drops | any time | nothing stops; the agents reclaim RAM staging of migrations that completed; with a LivePod, the controller deletes the fenced source pod 2 min after its successor is Ready (otherwise delete it by hand); leftover destination pods carry the `lcm.rooty.dev/migration-id` annotation |
 

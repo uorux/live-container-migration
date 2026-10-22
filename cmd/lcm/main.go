@@ -186,8 +186,12 @@ func main() {
 		os.Exit(1)
 	}
 	ck := res.Checkpoint
+	bo := res.Blackout.Round(time.Millisecond).String()
+	if res.Restore == nil {
+		bo = "unknown (the destination agent didn't return the restore result)"
+	}
 	fmt.Fprintf(os.Stderr, "done: %s -> %s/%s in %s; blackout %s (final dump %dms, ship %dms, restore %dms)\n",
-		res.SourcePod, res.DestNode, res.DestPod, time.Since(start).Round(time.Millisecond), res.Blackout.Round(time.Millisecond),
+		res.SourcePod, res.DestNode, res.DestPod, time.Since(start).Round(time.Millisecond), bo,
 		ck.FinalDumpMS, ck.ShipMS, restoreMS(res))
 }
 

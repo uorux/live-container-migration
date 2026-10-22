@@ -294,16 +294,20 @@ func (a *Agent) finish(ctx context.Context, req api.CheckpointRequest, dir, uppe
 		}
 		return dst.ready(ctx)
 	}
+	// The source freed the pre-dump pages it shipped, so the only complete state is split between
+	// this node and the destination: keep retrying through blips (a destination agent restart,
+	// a network hiccup) for up to shipDeadline before handing over to `lcm recover`.
+	deadline := time.Now().Add(shipDeadline)
 	for attempt := 1; ; attempt++ {
 		err := ship()
 		if err == nil {
 			break
 		}
-		if attempt == 4 {
-			return res, err
+		if time.Now().After(deadline) {
+			return res, fmt.Errorf("%w (gave up after %d attempts over %s)", err, attempt, shipDeadline)
 		}
 		emit(api.Event{Phase: "ship", Message: fmt.Sprintf("attempt %d failed, retrying: %v", attempt, err)})
-		time.Sleep(time.Duration(attempt) * time.Second)
+		time.Sleep(time.Duration(min(attempt, 5)) * time.Second)
 	}
 	os.WriteFile(filepath.Join(dir, "SHIPPED"), nil, 0o644)
 	res.ShipMS = since(t1)
@@ -314,6 +318,9 @@ func (a *Agent) finish(ctx context.Context, req api.CheckpointRequest, dir, uppe
 	emit(api.Event{Phase: "ready", Millis: res.FrozenMS, Message: "destination staged"})
 	return res, nil
 }
+
+// shipDeadline bounds the retries of the post-dump transfer.
+const shipDeadline = 90 * time.Second
 
 // finalLead: FINAL goes out before a pre-dump round expected to take at most this long (plus the
 // final dump). lcm-runc waits up to 100 s for READY, so a misestimate has a wide margin.
