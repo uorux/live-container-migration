@@ -1,0 +1,98 @@
+{ config, lib, pkgs, ... }:
+let
+  cfg = config.lab;
+  labKey = builtins.readFile ./lab_ed25519.pub;
+  # Everything CRIU (spawned by runc, spawned by the containerd shim, spawned by k3s) needs on PATH.
+  criuPath = with pkgs; [ criu iptables nftables iproute2 kmod util-linux ];
+in
+{
+  options.lab = {
+    ip = lib.mkOption { type = lib.types.str; };
+    serverIp = lib.mkOption { type = lib.types.str; };
+    sshPort = lib.mkOption { type = lib.types.port; };
+    role = lib.mkOption { type = lib.types.enum [ "server" "agent" ]; };
+  };
+
+  config = {
+    system.stateVersion = "26.05";
+    nixpkgs.overlays = [ (import ../nix/overlay.nix) ];
+    # Lets me iterate with `nixos-rebuild switch --flake /lcm/lab#nodeN` inside the VM (builds land on the VM disk).
+    nix.settings.experimental-features = [ "nix-command" "flakes" ];
+    documentation.enable = false;
+
+    boot.kernelPackages = pkgs.linuxPackages_latest;
+    # sock_diag modules CRIU uses to dump sockets (TCP repair needs tcp_diag).
+    boot.kernelModules = [ "inet_diag" "tcp_diag" "udp_diag" "unix_diag" "netlink_diag" "packet_diag" "nf_tables" "br_netfilter" ];
+
+    virtualisation = {
+      memorySize = 6144;
+      cores = 4;
+      diskSize = 40960;
+      graphics = false;
+      writableStoreUseTmpfs = false;
+      forwardPorts = [{ from = "host"; host.address = "127.0.0.1"; host.port = cfg.sshPort; guest.port = 22; }];
+      # Second NIC on a VDE switch is the private "cluster" network shared by all lab nodes (eth1).
+      qemu.options = [
+        "-cpu host"
+        "-device virtio-net-pci,netdev=vlan1,mac=52:54:00:12:01:${lib.last (lib.splitString "." cfg.ip)}"
+        "-netdev vde,id=vlan1,sock=\"$QEMU_VDE_SOCKET_1\""
+      ];
+      sharedDirectories.lcm = { source = "/home/jrt/Documents/live-container-migration"; target = "/lcm"; };
+    };
+
+    networking = {
+      usePredictableInterfaceNames = false;
+      firewall.enable = false;
+      interfaces.eth1.ipv4.addresses = [{ address = cfg.ip; prefixLength = 24; }];
+      extraHosts = ''
+        192.168.100.11 node1
+        192.168.100.12 node2
+        192.168.100.13 node3
+      '';
+    };
+
+    services.openssh = { enable = true; settings.PermitRootLogin = "prohibit-password"; };
+    users.users.root.openssh.authorizedKeys.keys = [ labKey ];
+
+    services.k3s = {
+      enable = true;
+      role = cfg.role;
+      token = "lcm-lab-token";
+      serverAddr = lib.mkIf (cfg.role == "agent") "https://${cfg.serverIp}:6443";
+      extraFlags = [
+        "--node-ip=${cfg.ip}"
+        "--kubelet-arg=feature-gates=ContainerCheckpoint=true"
+      ] ++ lib.optionals (cfg.role == "server") [
+        "--flannel-backend=none"
+        "--disable-network-policy"
+        "--disable-kube-proxy"
+        "--disable=traefik,servicelb,metrics-server"
+        "--write-kubeconfig-mode=644"
+        "--tls-san=${cfg.ip}"
+      ];
+    };
+    systemd.services.k3s.path = criuPath;
+    # containerd 2.3.x: re-enable restore-from-checkpoint-image via CreateContainer (off by default since 2.3.4).
+    environment.etc."lcm/containerd-restore.toml".text = ''
+      [plugins.'io.containerd.cri.v1.runtime']
+        enable_experimental_restore_via_create = true
+    '';
+    systemd.tmpfiles.settings.lcm-containerd."/var/lib/rancher/k3s/agent/etc/containerd/config-v3.toml.d/50-lcm-restore.toml"."L+".argument = "/etc/lcm/containerd-restore.toml";
+
+    environment.systemPackages = with pkgs; criuPath ++ [
+      cilium-cli kubectl kubernetes-helm jq tcpdump strace conntrack-tools bpftools
+      skopeo buildah jdk21_headless python3 socat nfs-utils curl htop runc rsync
+    ];
+
+    # NFS server on node1 stands in for shared (RWX) storage in the lab.
+    services.nfs.server = lib.mkIf (cfg.role == "server") {
+      enable = true;
+      exports = "/srv/nfs 192.168.100.0/24(rw,sync,no_subtree_check,no_root_squash)";
+    };
+    systemd.tmpfiles.rules = [ "d /srv/nfs 0777 root root -" ];
+    # Checkpoint staging in RAM: CRIU restore is bound by how fast it can read the page images.
+    virtualisation.fileSystems."/var/lib/lcm/ckpt" = { device = "tmpfs"; fsType = "tmpfs"; options = [ "mode=0700" "size=60%" ]; };
+    virtualisation.fileSystems."/var/lib/lcm/restore" = { device = "tmpfs"; fsType = "tmpfs"; options = [ "mode=0700" "size=60%" ]; };
+    boot.supportedFilesystems = [ "nfs" ];
+  };
+}

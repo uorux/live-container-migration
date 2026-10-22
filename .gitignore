@@ -1,0 +1,6 @@
+lab/keys/
+lab/state/
+bin/
+result
+result-*
+*.qcow2

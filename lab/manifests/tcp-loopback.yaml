@@ -1,0 +1,36 @@
+# Two processes in one container talking over loopback TCP; the client checks every echo.
+# Used to verify CRIU --tcp-established carries loopback connections across a migration.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: tcpl
+spec:
+  runtimeClassName: lcm
+  nodeName: node2
+  containers:
+  - name: c
+    image: python:3.13-alpine
+    command: ["python3", "-u", "-c"]
+    args:
+    - |
+      import socket, threading, time
+      srv = socket.socket(); srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+      srv.bind(("127.0.0.1", 9000)); srv.listen()
+      def serve():
+          c, _ = srv.accept()
+          while True:
+              d = c.recv(65536)
+              if not d: break
+              c.sendall(d)
+      threading.Thread(target=serve, daemon=True).start()
+      cl = socket.create_connection(("127.0.0.1", 9000))
+      i, last, maxgap = 0, time.monotonic(), 0
+      while True:
+          msg = f"{i:012d}".encode() * 100
+          cl.sendall(msg); got = b""
+          while len(got) < len(msg):
+              got += cl.recv(len(msg) - len(got))
+          assert got == msg, f"mismatch at {i}"
+          now = time.monotonic(); maxgap = max(maxgap, now - last); last = now
+          if i % 50 == 0: print(f"i={i} wall={time.time():.3f} maxgap={maxgap*1000:.0f}ms", flush=True)
+          i += 1; time.sleep(0.02)

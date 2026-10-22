@@ -1,0 +1,30 @@
+# Plain Paper server pod (no relay yet) for CRIU experiments.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: mc
+  labels: {app: mc}
+spec:
+  nodeName: node2
+  containers:
+  - name: mc
+    image: itzg/minecraft-server:java21
+    env:
+    - {name: EULA, value: "TRUE"}
+    - {name: TYPE, value: PAPER}
+    - {name: VERSION, value: "1.21.10"}
+    - {name: MEMORY, value: 2G}
+    - {name: ONLINE_MODE, value: "FALSE"}
+    - {name: ENABLE_RCON, value: "FALSE"}
+    - {name: VIEW_DISTANCE, value: "6"}
+    # Keep JNA's extracted-then-deleted native libs off the shared volume: CRIU stores deleted files on
+    # the container rootfs as ghost files, but can't handle NFS/CephFS silly-renamed ones.
+    - {name: JVM_OPTS, value: "-Djna.tmpdir=/tmp -Djava.io.tmpdir=/tmp"}
+    ports: [{containerPort: 25565}]
+    resources:
+      requests: {cpu: "1", memory: 3Gi}
+      limits: {memory: 3Gi}
+    volumeMounts: [{name: data, mountPath: /data}]
+  volumes:
+  - name: data
+    persistentVolumeClaim: {claimName: mc-data}
