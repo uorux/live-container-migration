@@ -3,6 +3,14 @@
 Status 2026-10-22: proven in the lab (3 NixOS VMs mirroring prod: k3s 1.36.5, containerd 2.3.4,
 Cilium 1.20.2 VXLAN/cluster-pool/KPR, kernel 7.3). Not yet on the real nodes.
 
+## Status (2026-10-22)
+
+- nixos-dots: https://github.com/otisdog8/nixos-dots/pull/14 (opened by Hermes from
+  uorux/nixos-docs-agent-fork branch feat/live-container-migration).
+- homelab: https://github.com/uorux/homelab/pull/370 (draft; merge after the NixOS rollout; needs the
+  1Password item `lcm-test-tunnel`/`token` and confirmation of LB IP 10.0.0.201).
+- Then: smoke test, Paper test server with bots, Jacob with a real client.
+
 ## What changes where
 
 | Where | Change | Who applies it |
