@@ -1,0 +1,20 @@
+# Fabric world. Lab stand-in for CephFS: an RWX NFS volume (node1:/srv/nfs/fabric) mountable on every node.
+apiVersion: v1
+kind: PersistentVolume
+metadata: {name: fabric-data}
+spec:
+  capacity: {storage: 10Gi}
+  accessModes: [ReadWriteMany]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  mountOptions: [nfsvers=4.2, hard]
+  nfs: {server: 192.168.100.11, path: /srv/nfs/fabric}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: fabric-data}
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: ""
+  volumeName: fabric-data
+  resources: {requests: {storage: 10Gi}}

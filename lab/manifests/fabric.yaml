@@ -1,0 +1,40 @@
+# Fabric (server-side mods only, so vanilla clients can join) behind lcm-relay (injected from the node agent into an emptyDir) on the lcm runtime class.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: fabric
+  labels: {app: fabric}
+spec:
+  runtimeClassName: lcm
+  nodeName: node2
+  initContainers:
+  - name: fetch-relay
+    image: busybox:1.37
+    command: ["sh", "-c", "wget -q -O /lcm/lcm-relay http://$HOST_IP:7790/v1/bin/lcm-relay && chmod +x /lcm/lcm-relay"]
+    env: [{name: HOST_IP, valueFrom: {fieldRef: {fieldPath: status.hostIP}}}]
+    volumeMounts: [{name: lcm-bin, mountPath: /lcm}]
+  containers:
+  - name: mc
+    image: itzg/minecraft-server:java21
+    command: ["/lcm/lcm-relay", "run", "-gateway", "lcm-gateway-tunnel.default.svc.cluster.local:7000", "-token-file", "/secret/token", "-proxy-protocol=false", "--", "/start"]
+    env:
+    - {name: EULA, value: "TRUE"}
+    - {name: TYPE, value: FABRIC}
+    - {name: MODRINTH_PROJECTS, value: "lithium,ferrite-core,fabric-api"}
+    - {name: VERSION, value: "1.21.10"}
+    - {name: MEMORY, value: 1536M}
+    - {name: ONLINE_MODE, value: "FALSE"}
+    - {name: ENABLE_RCON, value: "FALSE"}
+    - {name: VIEW_DISTANCE, value: "6"}
+    - {name: JVM_OPTS, value: "-Djna.tmpdir=/tmp -Djava.io.tmpdir=/tmp"}
+    resources:
+      requests: {cpu: "1", memory: 3Gi}
+      limits: {memory: 3584Mi}
+    volumeMounts:
+    - {name: data, mountPath: /data}
+    - {name: lcm-bin, mountPath: /lcm}
+    - {name: secret, mountPath: /secret, readOnly: true}
+  volumes:
+  - {name: data, persistentVolumeClaim: {claimName: fabric-data}}
+  - {name: lcm-bin, emptyDir: {}}
+  - {name: secret, secret: {secretName: lcm-tunnel}}
