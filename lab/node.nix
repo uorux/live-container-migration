@@ -17,6 +17,7 @@ in
     services.lcm = {
       enable = true;
       tokenFile = "/etc/lcm/token";
+      deriveTokenFromK3s = false; # node2/3 are k3s agents without a server token
       stagingSize = "60%";
     };
     environment.etc."lcm/token".text = "lab-token-not-secret"; # lab only: lands in the store

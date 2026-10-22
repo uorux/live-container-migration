@@ -34,7 +34,7 @@ func main() {
 	ns := fs.String("n", "default", "namespace")
 	to := fs.String("to", "", "target node (required)")
 	ctr := fs.String("container", "", "container to migrate (default: the only one)")
-	tokenFile := fs.String("token-file", os.Getenv("LCM_TOKEN_FILE"), "agent bearer token file")
+	tokenFile := fs.String("token-file", envOr("LCM_TOKEN_FILE", "/run/lcm/token"), "agent bearer token file")
 	kubeconfig := fs.String("kubeconfig", os.Getenv("KUBECONFIG"), "kubeconfig (default: in-cluster or ~/.kube/config)")
 	preMax := fs.Int("predump-max", 4, "max pre-copy rounds")
 	preTarget := fs.Int64("predump-target", 64<<20, "stop pre-copy once a round is smaller than this many bytes")
@@ -93,6 +93,13 @@ func main() {
 	fmt.Fprintf(os.Stderr, "done: %s -> %s/%s in %s; blackout %s (final dump %dms, ship %dms, restore %dms)\n",
 		res.SourcePod, res.DestNode, res.DestPod, time.Since(start).Round(time.Millisecond), res.Blackout.Round(time.Millisecond),
 		ck.FinalDumpMS, ck.ShipMS, restoreMS(res))
+}
+
+func envOr(k, def string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return def
 }
 
 func restoreMS(r *controller.Result) int64 {

@@ -38,7 +38,24 @@ in
     };
     tokenFile = mkOption {
       type = types.path;
-      description = "File with the bearer token agents and the lcm CLI share. Keep it out of the store.";
+      default = "/run/lcm/token";
+      description = ''
+        File with the bearer token agents and the lcm CLI share. Keep it out of the store. The
+        default is derived from the k3s cluster token (see deriveTokenFromK3s).
+      '';
+    };
+    deriveTokenFromK3s = mkOption {
+      type = types.bool;
+      default = true;
+      description = ''
+        Write tokenFile as HMAC-SHA256(k3s server token, "lcm-agent-v1") at boot, so every server
+        node gets the same agent token without a new secret to distribute (and the cluster token
+        itself never leaves the node).
+      '';
+    };
+    k3sTokenFile = mkOption {
+      type = types.str;
+      default = "/var/lib/rancher/k3s/server/token";
     };
     listenAddress = mkOption {
       type = types.str;
@@ -119,11 +136,25 @@ in
     };
     systemd.mounts = [ (stagingMount "/var/lib/lcm/ckpt") (stagingMount "/var/lib/lcm/restore") ];
 
+    systemd.services.lcm-token = lib.mkIf cfg.deriveTokenFromK3s {
+      description = "Derive the lcm agent token from the k3s cluster token";
+      wantedBy = [ "multi-user.target" ];
+      before = [ "lcm-agent.service" ];
+      unitConfig.ConditionPathExists = cfg.k3sTokenFile;
+      serviceConfig = { Type = "oneshot"; RemainAfterExit = true; UMask = "0077"; };
+      path = [ pkgs.openssl pkgs.coreutils ];
+      script = ''
+        mkdir -p "$(dirname ${cfg.tokenFile})"
+        printf %s lcm-agent-v1 | openssl dgst -sha256 -hmac "$(tr -d '\n' < ${cfg.k3sTokenFile})" -r | cut -d' ' -f1 > ${cfg.tokenFile}.tmp
+        mv ${cfg.tokenFile}.tmp ${cfg.tokenFile}
+      '';
+    };
+
     systemd.services.lcm-agent = {
       description = "Live container migration agent";
       wantedBy = [ "multi-user.target" ];
-      after = [ "network-online.target" "var-lib-lcm-ckpt.mount" "var-lib-lcm-restore.mount" ];
-      wants = [ "network-online.target" ];
+      after = [ "network-online.target" "var-lib-lcm-ckpt.mount" "var-lib-lcm-restore.mount" "lcm-token.service" ];
+      wants = [ "network-online.target" ] ++ lib.optional cfg.deriveTokenFromK3s "lcm-token.service";
       requires = [ "var-lib-lcm-ckpt.mount" "var-lib-lcm-restore.mount" ];
       path = [ cfg.criuPackage pkgs.iptables pkgs.nftables ];
       environment.LCM_BIN_DIR = "${cfg.package}/bin";
