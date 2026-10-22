@@ -2,8 +2,6 @@
 let
   cfg = config.lab;
   labKey = builtins.readFile ./lab_ed25519.pub;
-  # Everything CRIU (spawned by runc, spawned by the containerd shim, spawned by k3s) needs on PATH.
-  criuPath = with pkgs; [ criu iptables nftables iproute2 kmod util-linux ];
 in
 {
   options.lab = {
@@ -13,7 +11,15 @@ in
     role = lib.mkOption { type = lib.types.enum [ "server" "agent" ]; };
   };
 
+  imports = [ ../nix/module.nix ];
+
   config = {
+    services.lcm = {
+      enable = true;
+      tokenFile = "/etc/lcm/token";
+      stagingSize = "60%";
+    };
+    environment.etc."lcm/token".text = "lab-token-not-secret"; # lab only: lands in the store
     system.stateVersion = "26.05";
     nixpkgs.overlays = [ (import ../nix/overlay.nix) ];
     # Lets me iterate with `nixos-rebuild switch --flake /lcm/lab#nodeN` inside the VM (builds land on the VM disk).
@@ -71,15 +77,8 @@ in
         "--tls-san=${cfg.ip}"
       ];
     };
-    systemd.services.k3s.path = criuPath;
-    # containerd 2.3.x: re-enable restore-from-checkpoint-image via CreateContainer (off by default since 2.3.4).
-    environment.etc."lcm/containerd-restore.toml".text = ''
-      [plugins.'io.containerd.cri.v1.runtime']
-        enable_experimental_restore_via_create = true
-    '';
-    systemd.tmpfiles.settings.lcm-containerd."/var/lib/rancher/k3s/agent/etc/containerd/config-v3.toml.d/50-lcm-restore.toml"."L+".argument = "/etc/lcm/containerd-restore.toml";
 
-    environment.systemPackages = with pkgs; criuPath ++ [
+    environment.systemPackages = with pkgs; [
       cilium-cli kubectl kubernetes-helm jq tcpdump strace conntrack-tools bpftools
       skopeo buildah jdk21_headless python3 socat nfs-utils curl htop runc rsync
     ];
@@ -90,9 +89,6 @@ in
       exports = "/srv/nfs 192.168.100.0/24(rw,sync,no_subtree_check,no_root_squash)";
     };
     systemd.tmpfiles.rules = [ "d /srv/nfs 0777 root root -" ];
-    # Checkpoint staging in RAM: CRIU restore is bound by how fast it can read the page images.
-    virtualisation.fileSystems."/var/lib/lcm/ckpt" = { device = "tmpfs"; fsType = "tmpfs"; options = [ "mode=0700" "size=60%" ]; };
-    virtualisation.fileSystems."/var/lib/lcm/restore" = { device = "tmpfs"; fsType = "tmpfs"; options = [ "mode=0700" "size=60%" ]; };
     boot.supportedFilesystems = [ "nfs" ];
   };
 }

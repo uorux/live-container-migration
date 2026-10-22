@@ -20,6 +20,8 @@ import (
 	"syscall"
 	"time"
 
+	"lcm/internal/api"
+	"lcm/internal/relayctl"
 	"lcm/internal/rootfsdiff"
 	"lcm/internal/stage"
 )
@@ -59,8 +61,8 @@ func parse(argv []string) invocation {
 
 type createArgs struct {
 	bundle, pidFile, consoleSocket, pidfdSocket, id string
-	noPivot, noNewKeyring                          bool
-	preserveFDs                                    string
+	noPivot, noNewKeyring                           bool
+	preserveFDs                                     string
 }
 
 func parseCreate(args []string) createArgs {
@@ -147,18 +149,16 @@ func create(inv invocation) {
 	os.Exit(restore(inv, c, spec, key))
 }
 
-type result struct {
-	ContainerID string    `json:"containerID"`
-	Started     time.Time `json:"started"`
-	RootfsMS    int64     `json:"rootfsMs"`
-	RestoreMS   int64     `json:"restoreMs"`
-	ExitCode    int       `json:"exitCode"`
-	Error       string    `json:"error,omitempty"`
-}
-
 func restore(inv invocation, c createArgs, spec *ociSpec, key stage.Key) int {
-	res := result{ContainerID: c.id, Started: time.Now()}
+	res := api.RestoreResult{ContainerID: c.id, Started: time.Now()}
 	defer func() {
+		res.Finished = time.Now()
+		// Keep CRIU's log: the staging dir lives in RAM and is dropped after the migration.
+		if b, err := os.ReadFile(filepath.Join(stage.WorkDir(key), "restore.log")); err == nil {
+			dir := filepath.Join(stage.Root(), "logs", key.String())
+			os.MkdirAll(dir, 0o755)
+			os.WriteFile(filepath.Join(dir, "restore.log"), b, 0o644)
+		}
 		b, _ := json.MarshalIndent(res, "", "  ")
 		os.WriteFile(stage.ResultFile(key), b, 0o644)
 	}()
@@ -215,6 +215,15 @@ func restore(inv invocation, c createArgs, spec *ociSpec, key stage.Key) int {
 	if err != nil {
 		return fail(fmt.Errorf("runc restore: %w (CRIU log: %s/restore.log)", err, stage.WorkDir(key)))
 	}
+	// The relay was quiesced before the dump; let it reconnect to the gateway now. (It also
+	// auto-resumes after a timeout, so a failure here only costs time.)
+	if pid := readPid(c.pidFile); pid > 0 {
+		if err := relayctl.Command(pid, "resume", 3*time.Second); err == nil {
+			res.RelayResume = "ok"
+		} else if !os.IsNotExist(err) {
+			res.RelayResume = err.Error()
+		}
+	}
 	if err := os.MkdirAll(filepath.Dir(stage.RestoredMarker(c.id)), 0o755); err == nil {
 		os.WriteFile(stage.RestoredMarker(c.id), []byte(key.String()), 0o644)
 	}
@@ -223,6 +232,16 @@ func restore(inv invocation, c createArgs, spec *ociSpec, key stage.Key) int {
 	os.Rename(stage.ReadyFile(key), stage.ReadyFile(key)+".consumed")
 	logf("restore %s (%s): ok rootfs=%dms restore=%dms", c.id, key, res.RootfsMS, res.RestoreMS)
 	return 0
+}
+
+func readPid(path string) int {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	var pid int
+	fmt.Sscan(strings.TrimSpace(string(b)), &pid)
+	return pid
 }
 
 type ociSpec struct {

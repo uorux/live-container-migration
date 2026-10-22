@@ -1,0 +1,21 @@
+{
+  "name": "mcbot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Minecraft player-experience probe bots for live-migration tests",
+  "main": "mcbot.js",
+  "bin": {
+    "mcbot": "mcbot.js"
+  },
+  "scripts": {
+    "start": "node mcbot.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "mineflayer": "4.39.0",
+    "prismarine-chat": "1.13.0",
+    "prismarine-nbt": "2.8.0"
+  }
+}

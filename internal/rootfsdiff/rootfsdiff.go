@@ -48,6 +48,10 @@ func Capture(upperdir string, w io.Writer) error {
 			})
 		}
 
+		// Unix sockets can't be archived; CRIU re-binds any listening socket on restore.
+		if info.Mode()&os.ModeSocket != 0 {
+			return nil
+		}
 		link := ""
 		if info.Mode()&os.ModeSymlink != 0 {
 			if link, err = os.Readlink(path); err != nil {

@@ -32,12 +32,12 @@ func (k Key) String() string { return k.Namespace + "_" + k.Pod + "_" + k.Contai
 //	result.json      written by lcm-runc after the restore attempt
 func RestoreDir(k Key) string { return filepath.Join(Root(), "restore", k.String()) }
 
-func ImagesDir(k Key) string     { return filepath.Join(RestoreDir(k), "images") }
-func RootfsDiff(k Key) string    { return filepath.Join(RestoreDir(k), "rootfs-diff.tar") }
-func ReadyFile(k Key) string     { return filepath.Join(RestoreDir(k), "READY") }
-func WorkDir(k Key) string       { return filepath.Join(RestoreDir(k), "work") }
-func ResultFile(k Key) string    { return filepath.Join(RestoreDir(k), "result.json") }
-func IsReady(k Key) bool         { _, err := os.Stat(ReadyFile(k)); return err == nil }
+func ImagesDir(k Key) string          { return filepath.Join(RestoreDir(k), "images") }
+func RootfsDiff(k Key) string         { return filepath.Join(RestoreDir(k), "rootfs-diff.tar") }
+func ReadyFile(k Key) string          { return filepath.Join(RestoreDir(k), "READY") }
+func WorkDir(k Key) string            { return filepath.Join(RestoreDir(k), "work") }
+func ResultFile(k Key) string         { return filepath.Join(RestoreDir(k), "result.json") }
+func IsReady(k Key) bool              { _, err := os.Stat(ReadyFile(k)); return err == nil }
 func FenceFile(ns, pod string) string { return filepath.Join(Root(), "fence", ns+"_"+pod) }
 
 // IsFenced reports whether the pod has been migrated away from this node: its containers must
