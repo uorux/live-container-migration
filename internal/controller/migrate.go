@@ -52,6 +52,7 @@ type Options struct {
 	// TransferNetwork (CIDR): ship checkpoint data to an agent address in this network instead
 	// of the node's InternalIP, e.g. a LAN faster than the overlay the InternalIPs are on.
 	TransferNetwork string
+	LazyRestore     bool // experimental: CRIU lazy pages on the destination
 	Log             func(format string, a ...any)
 }
 
@@ -177,7 +178,7 @@ func Migrate(ctx context.Context, kc kubernetes.Interface, o Options) (*Result, 
 
 	// 2. Checkpoint on the source, streamed progress.
 	req := api.CheckpointRequest{MigrationID: res.MigrationID, Namespace: o.Namespace, Pod: src.Name,
-		PodUID: string(src.UID), Container: ctrName, ContainerID: ctrID, DestKey: key, DestURL: shipURL, PreDump: o.PreDump, Relay: o.Relay}
+		PodUID: string(src.UID), Container: ctrName, ContainerID: ctrID, DestKey: key, DestURL: shipURL, PreDump: o.PreDump, Relay: o.Relay, LazyRestore: o.LazyRestore}
 	ck, err := runCheckpoint(ctx, srcURL, o.Token, req, logf)
 	res.Checkpoint = ck
 	if err != nil {

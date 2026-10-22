@@ -20,6 +20,9 @@ type CheckpointRequest struct {
 	DestKey string        `json:"destKey"`
 	DestURL string        `json:"destURL"` // base URL of the destination agent, e.g. http://10.0.0.2:7790
 	PreDump PreDumpPolicy `json:"preDump"`
+	// LazyRestore restores with CRIU lazy pages (experimental): shorter blackout, memory
+	// faulted in after the process resumes.
+	LazyRestore bool `json:"lazyRestore,omitempty"`
 	// Relay controls the in-container lcm-relay handshake: "auto" (quiesce if its control socket
 	// exists), "required", or "off".
 	Relay string `json:"relay,omitempty"`
@@ -70,6 +73,7 @@ type RestoreResult struct {
 	RootfsMS    int64     `json:"rootfsMs"`
 	RestoreMS   int64     `json:"restoreMs"`
 	RelayResume string    `json:"relayResume,omitempty"`
+	LazyPages   bool      `json:"lazyPages,omitempty"`
 	ExitCode    int       `json:"exitCode"`
 	Error       string    `json:"error,omitempty"`
 }

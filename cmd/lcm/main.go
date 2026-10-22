@@ -57,6 +57,7 @@ func main() {
 	waitImage := fs.String("wait-image", "", "image for the destination's wait init container (default busybox)")
 	asJSON := fs.Bool("json", false, "print the result as JSON")
 	histN := fs.Int("limit", 20, "history: how many migrations")
+	lazy := fs.Bool("lazy-restore", false, "experimental: restore with CRIU lazy pages (resume before memory is loaded)")
 	transferNet := fs.String("transfer-network", os.Getenv("LCM_TRANSFER_NETWORK"), "ship checkpoint data over agent addresses in this CIDR (e.g. a LAN) instead of InternalIPs")
 	allowManaged := fs.Bool("allow-managed", false, "migrate a pod with GitOps (Flux/Helm) labels; suspend reconciliation first")
 	fs.Parse(rest)
@@ -83,7 +84,7 @@ func main() {
 	start := time.Now()
 	opts := controller.Options{
 		Namespace: *ns, Pod: pod, Container: *ctr, TargetNode: *to,
-		Token: strings.TrimSpace(string(tok)), WaitImage: *waitImage, Relay: *relay, AllowManaged: *allowManaged, TransferNetwork: *transferNet,
+		Token: strings.TrimSpace(string(tok)), WaitImage: *waitImage, Relay: *relay, AllowManaged: *allowManaged, TransferNetwork: *transferNet, LazyRestore: *lazy,
 		PreDump: api.PreDumpPolicy{Max: *preMax, TargetBytes: *preTarget},
 		Log: func(f string, a ...any) {
 			fmt.Fprintf(os.Stderr, "%7.3fs "+f+"\n", append([]any{time.Since(start).Seconds()}, a...)...)

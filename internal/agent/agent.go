@@ -43,8 +43,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
@@ -370,6 +372,8 @@ func (a *Agent) handleDeleteStage(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// A lazy-pages daemon may still be serving the restored process from these images.
+	waitLazyDaemon(filepath.Join(dir, "work", "lazy-pages.pid"), 2*time.Minute)
 	// A reset for a new migration also drops the previous one's tombstone (see handleWait).
 	err := os.RemoveAll(dir)
 	if rerr := os.Remove(stage.ConsumedFile(r.PathValue("key"))); err == nil && rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
@@ -469,6 +473,23 @@ func moveStage(from, to string) error {
 		return fmt.Errorf("no final images to move")
 	}
 	return os.WriteFile(filepath.Join(to, "READY"), []byte(time.Now().Format(time.RFC3339Nano)), 0o644)
+}
+
+// waitLazyDaemon waits (up to max) for the lazy-pages daemon recorded in pidFile to exit.
+func waitLazyDaemon(pidFile string, max time.Duration) {
+	b, err := os.ReadFile(pidFile)
+	if err != nil {
+		return
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || pid <= 0 {
+		return
+	}
+	for deadline := time.Now().Add(max); time.Now().Before(deadline); time.Sleep(200 * time.Millisecond) {
+		if syscall.Kill(pid, 0) != nil {
+			return
+		}
+	}
 }
 
 // handleWait blocks until the staged restore is READY (204), or up to ?timeout (default 60s,

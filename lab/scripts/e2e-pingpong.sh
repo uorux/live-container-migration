@@ -14,7 +14,7 @@ for h in $(seq "$HOPS"); do
   sleep "$PAUSE"
   read -r POD NODE < <(kubectl get pod -l app="$APP" --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name} {.items[0].spec.nodeName}')
   TO=node2; [ "$NODE" = node2 ] && TO=node3
-  lcm migrate "$POD" --to "$TO" --token-file /etc/lcm/token 2>&1 | grep -E "^done|failed" | tee -a "$OUT/migrations.log"
+  lcm migrate "$POD" --to "$TO" --token-file /etc/lcm/token ${LCM_EXTRA:-} 2>&1 | grep -E "^done|failed" | tee -a "$OUT/migrations.log"
 done
 kill -INT $BOTS 2>/dev/null; wait $BOTS
 grep '"event":"gap"\|"event":"disconnect"' "$OUT/bots.jsonl" | awk -F'"gap_ms":' '{print substr($0,1,60) ($2 ? " gap_ms=" $2 : "")}' | head -30

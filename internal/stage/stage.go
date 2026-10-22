@@ -43,6 +43,13 @@ const (
 
 func RestoreDir(k Key) string { return filepath.Join(Root(), "restore", k.String()) }
 
+// LazyFile marks a staged restore to use CRIU lazy pages (userfaultfd): the process resumes
+// before its memory is loaded; a criu lazy-pages daemon serves pages on fault and pushes the rest.
+func LazyFile(k Key) string { return filepath.Join(RestoreDir(k), "LAZY") }
+
+// LazyPidFile holds the pid of a restore's lazy-pages daemon while it may still serve pages.
+func LazyPidFile(k Key) string { return filepath.Join(WorkDir(k), "lazy-pages.pid") }
+
 func ImagesDir(k Key) string  { return filepath.Join(RestoreDir(k), "images") }
 func RootfsDiff(k Key) string { return filepath.Join(RestoreDir(k), "rootfs-diff.tar") }
 func ReadyFile(k Key) string  { return filepath.Join(RestoreDir(k), "READY") }

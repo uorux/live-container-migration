@@ -235,6 +235,16 @@ func restore(inv invocation, c createArgs, spec *ociSpec, key stage.Key) int {
 	if c.noPivot {
 		args = append(args, "--no-pivot")
 	}
+	lazy := false
+	if _, err := os.Stat(stage.LazyFile(key)); err == nil {
+		if err := startLazyPages(key); err != nil {
+			logf("restore %s: lazy pages unavailable, restoring eagerly: %v", c.id, err)
+		} else {
+			lazy = true
+			args = append(args, "--lazy-pages")
+		}
+	}
+	res.LazyPages = lazy
 	args = append(args, c.id)
 
 	// The process image maps the relay binary it was started with; install exactly that one.
@@ -342,6 +352,39 @@ func installRelay(spec *ociSpec, key stage.Key) error {
 		return err
 	}
 	return os.Rename(tmp, host)
+}
+
+// startLazyPages launches `criu lazy-pages` for the staged images (detached: it outlives this
+// process, serving page faults and pushing the remaining pages, then exits) and waits for its
+// socket, which `runc restore --lazy-pages` connects to through the same work dir.
+func startLazyPages(key stage.Key) error {
+	work := stage.WorkDir(key)
+	if err := os.MkdirAll(work, 0o700); err != nil {
+		return err
+	}
+	criu, err := exec.LookPath("criu")
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(criu, "lazy-pages", "--images-dir", stage.ImagesDir(key), "--work-dir", work,
+		"-o", "lazy-pages.log", "-v4")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	os.WriteFile(stage.LazyPidFile(key), []byte(fmt.Sprint(cmd.Process.Pid)), 0o644)
+	go cmd.Wait()
+	sock := filepath.Join(work, "lazy-pages.socket")
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		if _, err := os.Stat(sock); err == nil {
+			return nil
+		}
+		if cmd.ProcessState != nil {
+			return fmt.Errorf("criu lazy-pages exited early (see %s/lazy-pages.log)", work)
+		}
+	}
+	cmd.Process.Kill()
+	return fmt.Errorf("criu lazy-pages socket did not appear (see %s/lazy-pages.log)", work)
 }
 
 func readPid(path string) int {

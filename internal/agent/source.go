@@ -195,6 +195,14 @@ func (a *Agent) checkpoint(ctx context.Context, req api.CheckpointRequest, emit 
 				return fmt.Errorf("shipping source addresses: %w", err)
 			}
 		}
+		if req.LazyRestore {
+			if err := os.WriteFile(filepath.Join(dir, "LAZY"), nil, 0o644); err != nil {
+				return err
+			}
+			if err := dst.putFile(bg, filepath.Join(dir, "LAZY"), "LAZY"); err != nil {
+				return fmt.Errorf("shipping lazy marker: %w", err)
+			}
+		}
 		for _, f := range []string{stage.RelayExeName, stage.RelayPathName} {
 			if _, err := os.Stat(filepath.Join(dir, f)); err == nil {
 				if err := dst.putFile(bg, filepath.Join(dir, f), f); err != nil {
