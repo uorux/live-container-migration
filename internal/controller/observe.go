@@ -154,3 +154,21 @@ func History(ctx context.Context, kc kubernetes.Interface, o Options, n int) ([]
 	}
 	return all, nil
 }
+
+// LivePodPod returns the running pod of LivePod name (label lcm.rooty.dev/livepod).
+func LivePodPod(ctx context.Context, kc kubernetes.Interface, ns, name string) (string, error) {
+	pods, err := kc.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{LabelSelector: "lcm.rooty.dev/livepod=" + name})
+	if err != nil {
+		return "", err
+	}
+	var running []string
+	for _, p := range pods.Items {
+		if p.Status.Phase == corev1.PodRunning && p.DeletionTimestamp == nil {
+			running = append(running, p.Name)
+		}
+	}
+	if len(running) != 1 {
+		return "", fmt.Errorf("livepod %s/%s has %d running pods (%v); expected exactly 1", ns, name, len(running), running)
+	}
+	return running[0], nil
+}

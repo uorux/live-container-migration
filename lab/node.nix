@@ -21,6 +21,8 @@ in
       stagingSize = "60%";
       # Exercise log shipping in the lab: lab/manifests/victorialogs.yaml runs a VictoriaLogs NodePort.
       logShipping.victoriaLogsUrl = "http://127.0.0.1:30428";
+      # Only the k3s server (node1) has the admin kubeconfig the LivePod controller uses.
+      livePods.enable = cfg.role == "server";
     };
     environment.etc."lcm/token".text = "lab-token-not-secret"; # lab only: lands in the store
     system.stateVersion = "26.05";

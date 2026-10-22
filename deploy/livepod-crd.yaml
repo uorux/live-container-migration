@@ -1,0 +1,39 @@
+# LivePod: one migratable pod kept in existence from a template (see internal/livepod).
+# GitOps manages LivePods; lcm-agent's controller (services.lcm.livePods.enable) creates the pod
+# when none exists, and `lcm migrate livepod/<name>` moves it.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: livepods.lcm.rooty.dev
+spec:
+  group: lcm.rooty.dev
+  names: {kind: LivePod, listKind: LivePodList, plural: livepods, singular: livepod, shortNames: [lp]}
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    served: true
+    storage: true
+    subresources: {status: {}}
+    additionalPrinterColumns:
+    - {name: Pod, type: string, jsonPath: .status.pod}
+    - {name: Node, type: string, jsonPath: .status.node}
+    - {name: Phase, type: string, jsonPath: .status.phase}
+    schema:
+      openAPIV3Schema:
+        type: object
+        properties:
+          spec:
+            type: object
+            required: [template]
+            properties:
+              template:
+                type: object
+                description: A pod template (metadata + spec). Use runtimeClassName lcm.
+                x-kubernetes-preserve-unknown-fields: true
+          status:
+            type: object
+            properties:
+              pod: {type: string}
+              node: {type: string}
+              phase: {type: string}
+              pods: {type: integer}

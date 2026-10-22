@@ -14,8 +14,13 @@ import (
 	"strings"
 	"time"
 
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/clientcmd"
 	"lcm/internal/agent"
+
 	"lcm/internal/api"
+	"lcm/internal/livepod"
 	"lcm/internal/logship"
 	"lcm/internal/stage"
 )
@@ -29,6 +34,8 @@ func main() {
 	listen := fs.String("listen", fmt.Sprintf(":%d", api.DefaultPort), "listen address")
 	tokenFile := fs.String("token-file", os.Getenv("LCM_TOKEN_FILE"), "file holding the shared bearer token")
 	vlogs := fs.String("victorialogs-url", os.Getenv("LCM_VICTORIALOGS_URL"), "ship logs (agent + lcm-runc) to this VictoriaLogs base URL")
+	livePods := fs.Bool("livepods", os.Getenv("LCM_LIVEPODS") == "1", "run the LivePod controller (leader-elected across agents)")
+	kubeconfig := fs.String("kubeconfig", os.Getenv("LCM_KUBECONFIG"), "kubeconfig for the LivePod controller")
 	binDir := fs.String("bin-dir", os.Getenv("LCM_BIN_DIR"), "directory with lcm-relay/lcm-gateway to serve to init containers")
 	fs.Parse(os.Args[2:])
 
@@ -54,6 +61,15 @@ func main() {
 		a.ExportLogShipping(shipper.Sent.Load, shipper.Dropped.Load)
 	}
 	go a.GC(context.Background(), 14*24*time.Hour)
+	if *livePods {
+		cfg, err := clientcmd.BuildConfigFromFlags("", *kubeconfig)
+		if err != nil {
+			log.Error("livepods: kubeconfig", "err", err)
+			os.Exit(1)
+		}
+		lc := &livepod.Controller{Kube: kubernetes.NewForConfigOrDie(cfg), Dyn: dynamic.NewForConfigOrDie(cfg), Log: log}
+		go lc.Run(context.Background(), livepod.Identity())
+	}
 	go a.FollowRestores(context.Background())
 	// Give the listener a moment, then finish or abort checkpoints a previous process left behind.
 	go func() { time.Sleep(time.Second); a.Recover(context.Background()) }()

@@ -87,6 +87,19 @@ in
         roughly the workload's RSS on both ends while it runs.
       '';
     };
+    livePods.enable = mkOption {
+      type = types.bool;
+      default = false;
+      description = ''
+        Run the LivePod controller in lcm-agent (leader-elected across nodes, using the k3s
+        admin kubeconfig): keeps one pod per LivePod (deploy/livepod-crd.yaml) in existence, so a
+        migratable server is recreated after a node failure and can be managed by GitOps.
+      '';
+    };
+    livePods.kubeconfig = mkOption {
+      type = types.str;
+      default = "/etc/rancher/k3s/k3s.yaml";
+    };
     logShipping.victoriaLogsUrl = mkOption {
       type = types.nullOr types.str;
       default = null;
@@ -187,6 +200,9 @@ in
         LCM_BIN_DIR = "${cfg.package}/bin";
       } // lib.optionalAttrs (cfg.logShipping.victoriaLogsUrl != null) {
         LCM_VICTORIALOGS_URL = cfg.logShipping.victoriaLogsUrl;
+      } // lib.optionalAttrs cfg.livePods.enable {
+        LCM_LIVEPODS = "1";
+        LCM_KUBECONFIG = cfg.livePods.kubeconfig;
       };
       serviceConfig = {
         ExecStart = "${cfg.package}/bin/lcm-agent serve -listen ${cfg.listenAddress}:${toString cfg.port} -token-file ${cfg.tokenFile}";

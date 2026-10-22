@@ -139,6 +139,14 @@ func main() {
 		}
 		return
 	}
+	if p, ok := strings.CutPrefix(opts.Pod, "livepod/"); ok && cmd == "migrate" {
+		name, err := controller.LivePodPod(ctx, kc, *ns, p)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		opts.Pod = name
+	}
 	if cmd == "recover" {
 		res, err := controller.Recover(ctx, kc, opts, *imagesOn, *key)
 		if err != nil {
