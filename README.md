@@ -58,7 +58,7 @@ Kubernetes.
 | `lcm-runc` | containerd runtime handler `lcm` | restores staged checkpoints on `create`; refuses fenced pods; otherwise plain runc |
 | `lcm-relay` | PID 1 of a migratable container | resumable tunnel to the gateway; the server listens on loopback |
 | `lcm-gateway` | Deployment | the players' stable endpoint; holds connections across migrations |
-| `lcm` | CLI | `migrate`, `status`, `history`, `recover` |
+| `lcm` | CLI | `migrate`, `drain`, `status`, `history`, `recover` |
 | LivePod | CRD + controller | keeps one migratable pod alive from a template (GitOps-friendly StatefulSet-of-one) |
 
 ## Requirements
@@ -83,7 +83,8 @@ kubectl apply -f deploy/runtimeclass.yaml          # RuntimeClass "lcm"
 kubectl apply -f deploy/homelab/lcm-test/gateway.yaml   # adapt: gateway + tunnel token Secret
 # run the server with runtimeClassName: lcm and lcm-relay as PID 1:
 #   deploy/examples/minecraft-livepod.yaml
-lcm migrate livepod/survival -n games --to carrack
+lcm migrate livepod/survival -n games --to carrack   # or --to auto
+lcm drain munificent      # node maintenance: move every lcm pod off a node
 lcm history
 ```
 

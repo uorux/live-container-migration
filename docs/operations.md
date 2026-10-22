@@ -14,6 +14,19 @@ Design background: [design.md](design.md). Rollout: [production.md](production.m
 | `lcm-relay` | PID 1 of the workload container | gateway; the server on loopback | pod logs of the workload |
 | `lcm` CLI | wherever you run it (a node: it reads `/run/lcm/token`) | Kubernetes API, agents | stderr |
 
+## Node maintenance (reboot or upgrade a node without kicking players)
+
+```sh
+kubectl cordon carrack
+lcm drain carrack        # live-migrates every runtimeClassName: lcm pod off it, one at a time,
+                         # each to the ready node with the most available memory
+kubectl drain carrack --ignore-daemonsets --delete-emptydir-data   # the rest, as usual
+# ... reboot / nixos-rebuild ...
+kubectl uncordon carrack
+```
+
+`lcm migrate <pod> --to auto` picks a target the same way for a single pod.
+
 ## Quick look
 
 ```sh

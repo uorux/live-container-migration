@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 
@@ -25,7 +26,7 @@ import (
 )
 
 func main() {
-	usage := "usage: lcm migrate <pod>|livepod/<name> --to <node> [flags]\n       lcm status | lcm history [-limit N]\n       lcm recover <template-pod> --to <node> --images-on <node> --key <key>"
+	usage := "usage: lcm migrate <pod>|livepod/<name> --to <node>|auto [flags]\n       lcm drain <node> [flags]   (live-migrate every lcm pod off a node)\n       lcm status | lcm history [-limit N]\n       lcm recover <template-pod> --to <node> --images-on <node> --key <key>"
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(2)
@@ -33,7 +34,7 @@ func main() {
 	cmd, pod, rest := os.Args[1], "", os.Args[2:]
 	switch cmd {
 	case "status", "history":
-	case "migrate", "recover":
+	case "migrate", "recover", "drain":
 		if len(rest) == 0 {
 			fmt.Fprintln(os.Stderr, usage)
 			os.Exit(2)
@@ -140,6 +141,9 @@ func main() {
 		}
 		return
 	}
+	if cmd == "drain" {
+		os.Exit(drain(ctx, kc, opts, pod, *asJSON))
+	}
 	if p, ok := strings.CutPrefix(opts.Pod, "livepod/"); ok && cmd == "migrate" {
 		name, err := controller.LivePodPod(ctx, kc, *ns, p)
 		if err != nil {
@@ -157,6 +161,18 @@ func main() {
 		fmt.Fprintf(os.Stderr, "recovered: running on %s as %s\n", res.DestNode, res.DestPod)
 		return
 	}
+	if opts.TargetNode == "auto" {
+		src, err := kc.CoreV1().Pods(opts.Namespace).Get(ctx, opts.Pod, metav1.GetOptions{})
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		if opts.TargetNode, err = controller.PickTarget(ctx, kc, opts, src.Spec.NodeName); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		opts.Log("target: %s (most available memory)", opts.TargetNode)
+	}
 	res, err := controller.Migrate(ctx, kc, opts)
 	rep := controller.NewReport(opts, res, err, time.Since(start))
 	if rerr := controller.Report(context.WithoutCancel(ctx), kc, opts, rep); rerr != nil {
@@ -173,6 +189,58 @@ func main() {
 	fmt.Fprintf(os.Stderr, "done: %s -> %s/%s in %s; blackout %s (final dump %dms, ship %dms, restore %dms)\n",
 		res.SourcePod, res.DestNode, res.DestPod, time.Since(start).Round(time.Millisecond), res.Blackout.Round(time.Millisecond),
 		ck.FinalDumpMS, ck.ShipMS, restoreMS(res))
+}
+
+// drain live-migrates every lcm pod off node, one at a time, each to the node with the most
+// available memory. It carries on past failures and returns the exit code.
+func drain(ctx context.Context, kc kubernetes.Interface, base controller.Options, node string, asJSON bool) int {
+	pods, err := controller.DrainCandidates(ctx, kc, node)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	if len(pods) == 0 {
+		fmt.Fprintf(os.Stderr, "no running lcm pods on %s\n", node)
+		return 0
+	}
+	fmt.Fprintf(os.Stderr, "draining %d pod(s) from %s (cordon it first so nothing new lands there)\n", len(pods), node)
+	failed := 0
+	for _, p := range pods {
+		if ctx.Err() != nil {
+			break
+		}
+		o := base
+		o.Namespace, o.Pod = p.Namespace, p.Name
+		if o.Container == "" && len(p.Spec.Containers) != 1 {
+			fmt.Fprintf(os.Stderr, "skipping %s/%s: %d containers (migrate it with --container)\n", p.Namespace, p.Name, len(p.Spec.Containers))
+			failed++
+			continue
+		}
+		start := time.Now()
+		to, err := controller.PickTarget(ctx, kc, o, node)
+		if err == nil {
+			o.TargetNode = to
+			o.Log("%s/%s -> %s", p.Namespace, p.Name, to)
+			var res *controller.Result
+			res, err = controller.Migrate(ctx, kc, o)
+			rep := controller.NewReport(o, res, err, time.Since(start))
+			controller.Report(context.WithoutCancel(ctx), kc, o, rep)
+			if asJSON && res != nil {
+				json.NewEncoder(os.Stdout).Encode(res)
+			}
+			if err == nil {
+				fmt.Fprintf(os.Stderr, "done: %s/%s -> %s/%s; blackout %s\n", p.Namespace, p.Name, res.DestNode, res.DestPod, res.Blackout.Round(time.Millisecond))
+				continue
+			}
+		}
+		fmt.Fprintf(os.Stderr, "FAILED: %s/%s: %v\n", p.Namespace, p.Name, err)
+		failed++
+	}
+	if failed > 0 {
+		fmt.Fprintf(os.Stderr, "%d of %d pod(s) not drained\n", failed, len(pods))
+		return 1
+	}
+	return 0
 }
 
 func humanBytes(v float64) string {
