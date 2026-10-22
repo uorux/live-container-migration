@@ -128,11 +128,21 @@ in
     # shims keep running).
     systemd.services.k3s.restartTriggers = [ runtimeDropin ];
     # A copy, not a symlink: containerd refuses to start on a dangling drop-in, and a copy stays
-    # valid TOML even if this module is later removed. (tmpfiles C+ won't overwrite an existing
-    # file, so install it on every activation instead.)
-    system.activationScripts.lcm-containerd-runtime = ''
-      install -D -m 0644 ${runtimeDropin} ${cfg.containerdConfigDir}/60-lcm-runtime.toml
-    '';
+    # valid TOML even if this module is later removed. Installed by a unit ordered after the
+    # mount holding the drop-in dir (not an activation script: with impermanence,
+    # /var/lib/rancher is bind-mounted after activation runs at boot, hiding what it wrote).
+    systemd.services.lcm-containerd-dropin = {
+      description = "Install the lcm containerd runtime handler drop-in";
+      wantedBy = [ "k3s.service" ];
+      before = [ "k3s.service" ];
+      unitConfig.RequiresMountsFor = [ cfg.containerdConfigDir ];
+      restartTriggers = [ runtimeDropin ];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        ExecStart = "${pkgs.coreutils}/bin/install -D -m 0644 ${runtimeDropin} ${cfg.containerdConfigDir}/60-lcm-runtime.toml";
+      };
+    };
 
     systemd.tmpfiles.settings.lcm = {
       "/var/lib/lcm".d.mode = "0755";
