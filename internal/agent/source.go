@@ -62,6 +62,9 @@ func (a *Agent) checkpoint(ctx context.Context, req api.CheckpointRequest, emit 
 	if err := dst.reset(ctx); err != nil {
 		return nil, fmt.Errorf("destination agent: %w", err)
 	}
+	if dst.encoding(ctx) == "" {
+		emit(api.Event{Phase: "precopy", Message: "the destination agent predates compressed transfers; shipping uncompressed (upgrade it)"})
+	}
 
 	// Warm the destination's view of shared volumes while pre-copy runs (see warm.go).
 	warmed := map[string]bool{}
@@ -123,6 +126,7 @@ func (a *Agent) checkpoint(ctx context.Context, req api.CheckpointRequest, emit 
 	parent := ""
 	var prevBytes int64 = -1
 	var prevRate float64 // bytes/s of the previous round (dump + ship)
+	var lastBytes int64 = -1
 	for round := 1; round <= req.PreDump.Max; round++ {
 		if err := ctx.Err(); err != nil {
 			return nil, fmt.Errorf("cancelled before pre-dump %d: %w", round, err)
@@ -157,7 +161,7 @@ func (a *Agent) checkpoint(ctx context.Context, req api.CheckpointRequest, emit 
 		res.PreDumps = append(res.PreDumps, r)
 		emit(api.Event{Phase: "predump", Round: round, Bytes: size, Millis: r.DumpMS + r.ShipMS,
 			Message: fmt.Sprintf("dump %dms ship %dms", r.DumpMS, r.ShipMS)})
-		parent = name
+		parent, lastBytes = name, size
 		if size < req.PreDump.TargetBytes || (prevBytes >= 0 && size >= prevBytes) {
 			break // converged, or the dirty rate outpaces us: more rounds won't help
 		}
@@ -171,6 +175,12 @@ func (a *Agent) checkpoint(ctx context.Context, req api.CheckpointRequest, emit 
 		if ev != nil {
 			emit(*ev)
 		}
+	}
+	// Last exit before the workload stops: a final dump the destination can't hold would leave it
+	// stopped with nowhere to restore. Every pre-dump round stays staged there until the restore,
+	// so rounds that don't converge (a slow link, a high dirty rate) can fill it.
+	if free, need := dst.stagingFree(ctx), finalReserve(lastBytes); free >= 0 && free < need {
+		return nil, fmt.Errorf("the destination's staging has %s free and the final dump needs ~%s; not stopping the workload (raise services.lcm.stagingSize, or give pre-copy a faster link)", humanBytes(free), humanBytes(need))
 	}
 	if err := sendFinal(); err != nil {
 		return nil, err
@@ -329,6 +339,26 @@ const finalLead = 10 * time.Second
 // roundEstimate guesses how long pre-dump round `round` plus the final dump will take: the
 // previous round's size at its throughput (rounds shrink as they converge), or for the first
 // round the container's anonymous memory at a conservative 50 MB/s. Unknown means "long".
+// finalReserve is the staging space to keep free on the destination for the final dump, given
+// the last pre-dump round's size (the final dump's pages are those dirtied since, usually fewer)
+// plus non-page images.
+func finalReserve(lastRound int64) int64 {
+	if lastRound < 0 {
+		lastRound = 0
+	}
+	return lastRound + lastRound/2 + 256<<20
+}
+
+func humanBytes(n int64) string {
+	switch {
+	case n >= 1<<30:
+		return fmt.Sprintf("%.1f GiB", float64(n)/(1<<30))
+	case n >= 1<<20:
+		return fmt.Sprintf("%.0f MiB", float64(n)/(1<<20))
+	}
+	return fmt.Sprintf("%d B", n)
+}
+
 func roundEstimate(round int, anon, prevBytes int64, prevRate float64) time.Duration {
 	const finalMargin = 2 * time.Second
 	size, rate := prevBytes, prevRate

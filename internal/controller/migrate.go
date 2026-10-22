@@ -57,7 +57,9 @@ type Options struct {
 	// SkipMemoryCheck skips the pre-flight check that both nodes have the RAM for the staged
 	// images (see checkMemory).
 	SkipMemoryCheck bool
-	Log             func(format string, a ...any)
+	// AllowVersionSkew migrates even when an agent predates compression negotiation (see checkVersions).
+	AllowVersionSkew bool
+	Log              func(format string, a ...any)
 }
 
 type Result struct {
@@ -117,6 +119,11 @@ func Migrate(ctx context.Context, kc kubernetes.Interface, o Options) (*Result, 
 		return nil, err
 	}
 
+	if err := checkVersions(ctx, o.Token, srcURL, dstURL, logf); err != nil && !o.AllowVersionSkew {
+		return nil, err
+	} else if err != nil {
+		logf("warning: %v", err)
+	}
 	if !o.SkipMemoryCheck {
 		if err := checkMemory(ctx, o.Token, srcURL, dstURL, ctrID, logf); err != nil {
 			return nil, err
@@ -333,6 +340,43 @@ func Recover(ctx context.Context, kc kubernetes.Interface, o Options, imagesNode
 	agentDo(ctx, tgtURL, o.Token, http.MethodDelete, "/v1/stage/"+rb.key, nil)
 	res.DestPod, res.DestNode = rb.DestPod, rb.DestNode
 	return res, nil
+}
+
+// checkVersions refuses a migration involving an agent from before compression negotiation and
+// the source's staging-space check (its /v1/info lists no "encodings"): with one, shipping fails
+// in either direction, or a final dump can overflow the destination's staging after the workload
+// has stopped. Agent versions that merely differ are fine and only logged.
+func checkVersions(ctx context.Context, token, srcURL, dstURL string, logf func(string, ...any)) error {
+	get := func(base string) (version string, current bool, err error) {
+		b, err := agentDo(ctx, base, token, http.MethodGet, "/v1/info", nil)
+		if err != nil {
+			if strings.HasPrefix(err.Error(), "404") {
+				return "old", false, nil
+			}
+			return "", false, err
+		}
+		var i struct {
+			Version   string   `json:"version"`
+			Encodings []string `json:"encodings"`
+		}
+		json.Unmarshal(b, &i)
+		return i.Version, i.Encodings != nil, nil
+	}
+	sv, scur, err := get(srcURL)
+	if err != nil {
+		return fmt.Errorf("source agent: %w", err)
+	}
+	dv, dcur, err := get(dstURL)
+	if err != nil {
+		return fmt.Errorf("destination agent: %w", err)
+	}
+	if !scur || !dcur {
+		return fmt.Errorf("agent version skew (source %s, destination %s): an agent this old can strand the workload mid-migration; upgrade every node first (or pass --allow-version-skew)", sv, dv)
+	}
+	if sv != dv {
+		logf("note: agent versions differ (source %s, destination %s)", sv, dv)
+	}
+	return nil
 }
 
 type agentInfo struct {

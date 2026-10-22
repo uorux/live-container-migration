@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -11,7 +12,9 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
@@ -20,9 +23,52 @@ import (
 // stagingClient ships image dirs from the source agent to the destination agent. Bodies are
 // zstd-compressed: page images compress 6-8x (measured on a Minecraft JVM) and node-to-node links
 // (WireGuard) are far slower than the compressor, so this is the biggest lever on both pre-copy
-// convergence and the final ship inside the blackout.
+// convergence and the final ship inside the blackout. Receivers too old to decode zstd get plain
+// bodies (see encoding), so nodes can be upgraded one at a time.
 type stagingClient struct {
 	base, key, token string
+
+	mu    sync.Mutex
+	known bool
+	enc   string // Content-Encoding the receiver decodes: "zstd" or "" (plain)
+}
+
+// encoding returns the Content-Encoding to send, asking the receiving agent once. Agents from
+// before compressed transfers have no GET /v1/info (404) and get plain bodies; later ones decode
+// zstd, and list what they decode in "encodings". If the receiver can't be asked (unreachable,
+// restarting) the answer is zstd for now and it is asked again next time.
+func (c *stagingClient) encoding(ctx context.Context) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.known {
+		return c.enc
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(c.base, "/")+"/v1/info", nil)
+	if err != nil {
+		return "zstd"
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	resp, err := shipClient.Do(req)
+	if err != nil {
+		return "zstd"
+	}
+	defer resp.Body.Close()
+	switch {
+	case resp.StatusCode == http.StatusNotFound:
+		c.known, c.enc = true, ""
+	case resp.StatusCode/100 == 2:
+		var info struct {
+			Encodings []string `json:"encodings"`
+		}
+		json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&info)
+		c.known, c.enc = true, "zstd"
+		if info.Encodings != nil && !slices.Contains(info.Encodings, "zstd") {
+			c.enc = ""
+		}
+	default:
+		return "zstd"
+	}
+	return c.enc
 }
 
 // compressConcurrency bounds the cores compression takes on the source, where the workload is
@@ -61,6 +107,28 @@ func (c *stagingClient) doEnc(ctx context.Context, method, path string, body io.
 	return nil
 }
 
+// stagingFree returns the receiver's free staging space, or -1 if it doesn't say (an older agent,
+// or it can't be asked right now).
+func (c *stagingClient) stagingFree(ctx context.Context) int64 {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(c.base, "/")+"/v1/info", nil)
+	if err != nil {
+		return -1
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	resp, err := shipClient.Do(req)
+	if err != nil {
+		return -1
+	}
+	defer resp.Body.Close()
+	var info struct {
+		StagingFree *int64 `json:"stagingFree"`
+	}
+	if resp.StatusCode/100 != 2 || json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&info) != nil || info.StagingFree == nil {
+		return -1
+	}
+	return *info.StagingFree
+}
+
 func (c *stagingClient) reset(ctx context.Context) error {
 	return c.do(ctx, http.MethodDelete, "", nil)
 }
@@ -68,7 +136,7 @@ func (c *stagingClient) ready(ctx context.Context) error {
 	return c.do(ctx, http.MethodPost, "/ready", nil)
 }
 
-// putDir streams dir as a zstd-compressed tar (regular files, plus CRIU's relative `parent`
+// putDir streams dir as a (zstd-compressed) tar (regular files, plus CRIU's relative `parent`
 // symlink).
 func (c *stagingClient) putDir(ctx context.Context, dir, name string) error {
 	return c.putStream(ctx, "/dir/"+url.PathEscape(name), func(w io.Writer) error { return writeTar(w, dir) })
@@ -88,6 +156,18 @@ func (c *stagingClient) putFile(ctx context.Context, path, name string) error {
 
 func (c *stagingClient) putStream(ctx context.Context, path string, write func(io.Writer) error) error {
 	pr, pw := io.Pipe()
+	enc := c.encoding(ctx)
+	if enc == "" {
+		go func() {
+			bw := bufio.NewWriterSize(pw, 1<<20)
+			err := write(bw)
+			if err == nil {
+				err = bw.Flush()
+			}
+			pw.CloseWithError(err)
+		}()
+		return c.do(ctx, http.MethodPut, path, pr)
+	}
 	go func() {
 		zw, err := zstd.NewWriter(pw, zstd.WithEncoderLevel(zstd.SpeedDefault), zstd.WithEncoderConcurrency(compressConcurrency))
 		if err != nil {

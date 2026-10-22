@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -35,5 +36,35 @@ func TestCheckMemory(t *testing.T) {
 		if tc.wantErr == "" && err != nil || tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
 			t.Errorf("%s: err = %v, want %q", name, err, tc.wantErr)
 		}
+	}
+}
+
+func TestCheckVersions(t *testing.T) {
+	info := func(body string) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if body == "" {
+				http.NotFound(w, r)
+				return
+			}
+			io.WriteString(w, body)
+		}))
+	}
+	cur := info(`{"version":"0.1.0-a","encodings":["zstd"]}`)
+	cur2 := info(`{"version":"0.1.0-b","encodings":["zstd"]}`)
+	legacy := info("")
+	noEnc := info(`{"version":"0.1.0-c"}`)
+	for _, s := range []*httptest.Server{cur, cur2, legacy, noEnc} {
+		defer s.Close()
+	}
+	nolog := func(string, ...any) {}
+	ctx := context.Background()
+	if err := checkVersions(ctx, "t", cur.URL, cur2.URL, nolog); err != nil {
+		t.Errorf("differing current versions: %v", err)
+	}
+	if err := checkVersions(ctx, "t", cur.URL, legacy.URL, nolog); err == nil {
+		t.Error("legacy destination accepted")
+	}
+	if err := checkVersions(ctx, "t", noEnc.URL, cur.URL, nolog); err == nil {
+		t.Error("source without encodings accepted")
 	}
 }

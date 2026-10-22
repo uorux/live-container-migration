@@ -59,6 +59,7 @@ func main() {
 	asJSON := fs.Bool("json", false, "print the result as JSON")
 	histN := fs.Int("limit", 20, "history: how many migrations")
 	skipMem := fs.Bool("skip-memory-check", false, "migrate even if the nodes look short of RAM for the staged images")
+	allowSkew := fs.Bool("allow-version-skew", false, "migrate even if an agent is too old to negotiate with (see docs/operations.md)")
 	lazy := fs.Bool("lazy-restore", false, "experimental: restore with CRIU lazy pages (resume before memory is loaded)")
 	transferNet := fs.String("transfer-network", os.Getenv("LCM_TRANSFER_NETWORK"), "ship checkpoint data over agent addresses in this CIDR (e.g. a LAN) instead of InternalIPs")
 	allowManaged := fs.Bool("allow-managed", false, "migrate a pod with GitOps (Flux/Helm) labels; suspend reconciliation first")
@@ -86,7 +87,7 @@ func main() {
 	start := time.Now()
 	opts := controller.Options{
 		Namespace: *ns, Pod: pod, Container: *ctr, TargetNode: *to,
-		Token: strings.TrimSpace(string(tok)), WaitImage: *waitImage, Relay: *relay, AllowManaged: *allowManaged, TransferNetwork: *transferNet, LazyRestore: *lazy, SkipMemoryCheck: *skipMem,
+		Token: strings.TrimSpace(string(tok)), WaitImage: *waitImage, Relay: *relay, AllowManaged: *allowManaged, TransferNetwork: *transferNet, LazyRestore: *lazy, SkipMemoryCheck: *skipMem, AllowVersionSkew: *allowSkew,
 		PreDump: api.PreDumpPolicy{Max: *preMax, TargetBytes: *preTarget},
 		Log: func(f string, a ...any) {
 			fmt.Fprintf(os.Stderr, "%7.3fs "+f+"\n", append([]any{time.Since(start).Seconds()}, a...)...)
@@ -174,9 +175,11 @@ func main() {
 		opts.Log("target: %s (most available memory)", opts.TargetNode)
 	}
 	res, err := controller.Migrate(ctx, kc, opts)
-	rep := controller.NewReport(opts, res, err, time.Since(start))
-	if rerr := controller.Report(context.WithoutCancel(ctx), kc, opts, rep); rerr != nil {
-		fmt.Fprintln(os.Stderr, "warning: reporting the outcome to the agents:", rerr)
+	if res != nil { // nil: refused before anything started, nothing to record
+		rep := controller.NewReport(opts, res, err, time.Since(start))
+		if rerr := controller.Report(context.WithoutCancel(ctx), kc, opts, rep); rerr != nil {
+			fmt.Fprintln(os.Stderr, "warning: reporting the outcome to the agents:", rerr)
+		}
 	}
 	if *asJSON && res != nil {
 		json.NewEncoder(os.Stdout).Encode(res)

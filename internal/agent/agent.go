@@ -280,7 +280,8 @@ func (a *Agent) handleInfo(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	info := map[string]any{"addresses": addrs, "version": Version, "memAvailable": memAvailable(), "stagingFree": stagingFree()}
+	info := map[string]any{"addresses": addrs, "version": Version, "encodings": []string{"zstd"},
+		"memAvailable": memAvailable(), "stagingFree": stagingFree()}
 	if id := r.URL.Query().Get("container"); id != "" {
 		if !stage.ValidName(id) {
 			http.Error(w, "bad container id", http.StatusBadRequest)
@@ -440,6 +441,9 @@ func (a *Agent) handleForward(w http.ResponseWriter, r *http.Request) {
 	if err := dst.reset(ctx); err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
+	}
+	if dst.encoding(ctx) == "" {
+		a.log.Warn("the receiving agent predates compressed transfers; forwarding uncompressed", "to", req.DestURL)
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {

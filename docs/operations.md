@@ -27,6 +27,22 @@ kubectl uncordon carrack
 
 `lcm migrate <pod> --to auto` picks a target the same way for a single pod.
 
+## Upgrading lcm (version skew)
+
+Deploying a new lcm restarts `lcm-agent` only. In-flight migrations survive it (runc and CRIU
+keep running; the restarted agent finishes or aborts them), and running workloads are not touched.
+Upgrade every node in one go and migrate afterwards; `LcmAgentVersionSkew` fires while versions
+differ.
+
+While versions differ, migrations between agents that both negotiate (anything from 2026-10-22
+on: `/v1/info` lists `"encodings"`) work as usual: a sender only compresses for receivers that
+decode zstd, and the source's check that the final dump fits the destination's staging runs if
+either side is new. `lcm migrate` refuses a migration involving an older agent (the version first
+deployed, `version=dev` in `lcm status`), because with one of those a migration that doesn't
+converge can fill the destination's staging after the workload stopped (seen in the lab). Override
+with `--allow-version-skew` for small workloads; restores across versions work, and a rollback
+forwards uncompressed to an old source.
+
 ## Quick look
 
 ```sh
@@ -51,7 +67,7 @@ curl -s http://<gateway-admin>:8080/status | jq   # tunnel up/down, players, las
 | `lcm_restores_total{result}`, `lcm_restore_seconds{part}` | destination side, from lcm-runc |
 | `lcm_staging_bytes{dir}` | checkpoint images in RAM; must return to 0 after each migration |
 | `lcm_staged_restores`, `lcm_fences`, `lcm_agent_inflight_checkpoints` | node state |
-| `lcm_agent_build_info{version}` | all nodes should agree (a restore needs the same relay binary everywhere) |
+| `lcm_agent_build_info{version}` | all nodes should agree outside a rollout (see "Upgrading lcm") |
 | `lcm_logship_lines{state}` | log lines shipped to / dropped for VictoriaLogs |
 | `lcm_livepod_running{namespace,livepod,node,phase}` | per LivePod, from the leading controller: 1 if its pod is Running |
 | `lcm_livepod_controller_leader` | 1 on the agent leading the LivePod controller |
@@ -82,6 +98,7 @@ the metric HELP text for the exact list.
 | anything (CRIU error, network, destination agent) | before the final dump | migration aborts; the source never stopped; the relay resumes; players see nothing |
 | the source `lcm-agent` restarts | before the final dump | its runc/CRIU keep running (`KillMode=process`); the restarted agent aborts the migration and lifts the fence; the CLI learns this by polling |
 | the source `lcm-agent` restarts | during/after the final dump | runc finishes the dump; the restarted agent ships it and marks the destination ready; the parked destination pod restores (tested in the lab with players connected: no disconnects) |
+| the destination's staging can't hold the final dump (pre-copy didn't converge) | right before the final dump | aborted; the source keeps running (the source asks the destination's free staging first) |
 | shipping fails | after the final dump | retried for 90 s (e.g. a destination agent restart); then the CLI reports where the images are (final dump on the source, pre-dumps on the destination) for `lcm recover` |
 | the restore fails on the destination | after shipping | the destination pod is fenced, the images are forwarded back, the workload is restored on the source node (~10-15 s freeze) |
 | the CLI dies / its connection drops | any time | nothing stops; the agents reclaim RAM staging of migrations that completed; with a LivePod, the controller deletes the fenced source pod 2 min after its successor is Ready (otherwise delete it by hand); leftover destination pods carry the `lcm.rooty.dev/migration-id` annotation |

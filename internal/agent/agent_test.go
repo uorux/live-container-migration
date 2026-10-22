@@ -434,3 +434,44 @@ func TestCompressedStagingRoundTrip(t *testing.T) {
 		t.Errorf("file mismatch")
 	}
 }
+
+// An agent from before compressed transfers (no GET /v1/info, ignores Content-Encoding) must get
+// plain tar bodies: nodes are upgraded one at a time.
+func TestStagingPlainForLegacyReceiver(t *testing.T) {
+	var got []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("PUT /v1/stage/{key}/dir/{name}", func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, "enc="+r.Header.Get("Content-Encoding"))
+		tr := tar.NewReader(r.Body)
+		for {
+			h, err := tr.Next()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				http.Error(w, err.Error(), 500)
+				return
+			}
+			got = append(got, h.Name)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	legacy := httptest.NewServer(mux)
+	defer legacy.Close()
+	src := t.TempDir()
+	os.WriteFile(filepath.Join(src, "pages-1.img"), []byte("pages"), 0o644)
+	c := &stagingClient{base: legacy.URL, key: "ns_pod-m1_c", token: testToken}
+	if err := c.putDir(context.Background(), src, "images"); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(got, ",") != "enc=,pages-1.img" {
+		t.Errorf("legacy receiver saw %v", got)
+	}
+
+	// A current agent advertises zstd.
+	srv, _ := newTestServer(t)
+	c = &stagingClient{base: srv.URL, key: "ns_pod-m1_c", token: testToken}
+	if enc := c.encoding(context.Background()); enc != "zstd" {
+		t.Errorf("current agent: encoding %q, want zstd", enc)
+	}
+}
