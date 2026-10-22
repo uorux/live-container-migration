@@ -14,61 +14,23 @@ Production results:
 - Paper (3 GiB heap) with Jacob connected: he stayed connected through a 23 s freeze. Without
   players: 8.8-9.0 s. First move onto a node: 45 s (15 s image pull + 25 s cold CephFS reads).
 
-Fixes for all of that are merged in this repo (9c7a06c) and waiting on the nixos-dots branch
-`uorux:feat/lcm-speed-and-restart-safety` (lock bump only; restarts lcm-agent, not k3s):
-compressed transfers, `file-validation filesize`, image pre-pull, restart safety. In the lab
-with the link throttled to the tailnet's ~50 MB/s they give 0.2-3 s blackouts with bots.
+Fixes for all of that are in this repo and waiting on the nixos-dots branch
+`uorux:feat/lcm-speed-and-restart-safety` (a flake.lock bump only; deploying restarts lcm-agent,
+not k3s; it evaluates and builds at nixos-dots' nixpkgs pin):
 
-## What changes where
+- zstd-compressed transfers (6-8x on heap pages): the tailnet link was the bottleneck;
+- CRIU `file-validation filesize`: no reads of every open jar on CephFS (the 25 s cold restore);
+- image pre-pull on the destination before anything is dumped;
+- kubelet's container start overlaps the end of pre-copy (FINAL marker; ~1 s);
+- open files on shared volumes are opened on the destination during pre-copy (NFS delegation /
+  CephFS cap recalls; up to ~1.3 s per restore on NFS, 0.02-0.6 s seen on the CephFS restores);
+- restart safety, staging GC, a memory pre-flight check, and the LivePod controller (off).
 
-| Where | Change | Who applies it |
-| --- | --- | --- |
-| nixos-dots (arquitens, carrack, munificent) | flake input on this repo; `imports = [ lcm.nixosModules.default ]`; `services.lcm = { enable = true; tokenFile = <secret>; firewallInterfaces = [ "tailscale0" ]; }` | proposed via `uorux/nixos-docs-agent-fork`, Jacob merges, `tpl.nixos-dots-rebuild` per node |
-| uorux/homelab (Flux) | `RuntimeClass lcm` (deploy/runtimeclass.yaml); a namespace for the game server(s) with: gateway Deployment + LoadBalancer Service (Cilium LB-IPAM/L2) + tunnel ClusterIP + token Secret; the server pod (runtimeClassName lcm, relay injected, CephFS RWX PVC) | Hermes (homelab agent) opens the PR, Jacob merges |
-| this repo | published somewhere nixos-dots can fetch it (GitHub `uorux/live-container-migration` or similar) | needs a repo-create grant |
-
-Applying the NixOS module restarts k3s once per node (containerd only reads its drop-ins at
-start). Running pods are unaffected (their shims keep running), but do one node at a time.
-
-## Node facts (checked 2026-10-22, read-only)
-
-All three nodes are crosvm/KVM guests with identical vCPUs: AMD Ryzen 7 5800H, 14 vCPU, identical
-`/proc/cpuinfo` flags (md5 2c24d45d…), 45 GiB RAM (27-31 GiB available), kernel 7.2.11 with
-CHECKPOINT_RESTORE, MEM_SOFT_DIRTY, USERFAULTFD, INET_DIAG_DESTROY and TIME_NS all `=y`. k3s's
-containerd config already imports `config-v3.toml.d/*.toml` (the dir doesn't exist yet; the module
-creates it). No `/etc/criu`. Ceph is mounted. => CPU compatibility is a non-issue, and every kernel
-feature the design uses is present.
-
-Still to check before enabling: the firewall backend and rules on the nodes (the module opens the
-agent port to the pod CIDR and the listed interfaces), and node-to-node throughput over Tailscale.
-
-## Workload requirements (documented contract)
-
-- `runtimeClassName: lcm`; a bare pod (no ReplicaSet/StatefulSet owner yet; a LivePod controller
-  is future work).
-- Persistent data on RWX storage (`ceph-filesystem`), mounted at the same path. RBD (RWO) would
-  need a detach/attach inside the blackout; it isn't supported (and not yet rejected by the CLI).
-- No hostPath volumes.
-- The relay is the container entrypoint: `/lcm/lcm-relay run -gateway <svc>:7000 -token-file ...
-  [-proxy-protocol=false] -- <original entrypoint>`; an init container fetches the binary from the
-  node agent (`http://$HOST_IP:7790/v1/bin/lcm-relay`). Paper: enable `proxies.proxy-protocol` to
-  keep client IPs; vanilla/Fabric/Forge: `-proxy-protocol=false`.
-- Java: `-Djna.tmpdir=/tmp -Djava.io.tmpdir=/tmp` so deleted-but-open temp files are on the
-  container rootfs, not CephFS.
-- Memory limit with headroom over heap + JVM overhead.
-
-## Staged rollout
-
-1. Inventory (above). Fix anything missing in the module.
-2. nixos-dots: enable the module on one node, rebuild, verify `lcm-agent` health, `crictl info`
-   shows the `lcm` runtime, `criu check` passes. Then the other two.
-3. homelab: RuntimeClass + gateway in a `lcm-test` namespace.
-4. Smoke test with the tiny `tcp-mixed` workload between each node pair (blackout should be
-   < 1 s; outbound reset/reconnect; loopback continuity).
-5. Test server: a throwaway Paper/Fabric world on CephFS, bots through the gateway's LB IP,
-   ping-pong 10 hops, measure blackout on real hardware and Tailscale.
-6. Jacob joins with a real client and tries it.
-7. The real server.
+Lab, link throttled to ~50 MB/s, 3 bots: Fabric 0.68-0.77 s blackouts (worst client gap
+0.79 s), NeoForge 0.71-0.96 s, a TCP smoke pod 0.56-0.76 s; 0 disconnects. Expect more on
+production for big heaps: restores there copy memory at ~1.6 GB/s (the lab VMs do ~4.9 GB/s),
+so a 3.6 GB Paper heap restores in ~2.5 s. That's the VM layer (guest memory backing), not lcm;
+JVM transparent huge pages didn't help and made pre-dumps larger.
 
 ## Running the real server
 
