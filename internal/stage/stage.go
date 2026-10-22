@@ -32,6 +32,9 @@ func (k Key) String() string { return k.Namespace + "_" + k.Pod + "_" + k.Contai
 //	source-addrs     the source pod's IPs (see internal/netaddr)
 //	relay-exe        the exact lcm-relay binary the source process ran, and
 //	relay-path       its path inside the container (lcm-runc installs it before restoring)
+//	FINAL            the source has begun its final dump: a restore follows within seconds, so
+//	                 the wait init container may exit and lcm-runc waits for READY (overlapping
+//	                 kubelet's start-up latency with the dump and transfer)
 //	READY            written last; lcm-runc only restores when it exists
 //	READY.fenced     READY after the pod was fenced: never restored
 //	work/            CRIU work dir for the restore (logs)
@@ -56,6 +59,19 @@ func ReadyFile(k Key) string  { return filepath.Join(RestoreDir(k), "READY") }
 func WorkDir(k Key) string    { return filepath.Join(RestoreDir(k), "work") }
 func ResultFile(k Key) string { return filepath.Join(RestoreDir(k), "result.json") }
 func IsReady(k Key) bool      { _, err := os.Stat(ReadyFile(k)); return err == nil }
+func FinalFile(k Key) string  { return filepath.Join(RestoreDir(k), "FINAL") }
+
+// RestorePending reports whether a restore for k is about to be staged: the final dump began
+// (FINAL) but READY isn't there yet, and the staging was neither consumed nor fenced.
+func RestorePending(k Key) bool {
+	for _, f := range []string{ReadyFile(k), ReadyFile(k) + ".consumed", ReadyFile(k) + ".fenced"} {
+		if _, err := os.Stat(f); err == nil {
+			return false
+		}
+	}
+	_, err := os.Stat(FinalFile(k))
+	return err == nil
+}
 
 // ConsumedFile is a persistent (on-disk, survives reboots) tombstone that the restore for key
 // happened. The destination pod keeps its wait init container; if its sandbox is ever recreated

@@ -130,6 +130,10 @@ func main() {
 	execRunc(os.Args[1:])
 }
 
+// pendingTimeout bounds how long create waits for a final checkpoint that is being dumped and
+// shipped; well under the CRI runtime request timeout (2 min).
+const pendingTimeout = 75 * time.Second
+
 func create(inv invocation) {
 	c := parseCreate(inv.args)
 	spec, err := readSpec(c.bundle)
@@ -151,11 +155,36 @@ func create(inv invocation) {
 		fmt.Fprintln(os.Stderr, "lcm:", err)
 		os.Exit(1)
 	}
-	if stage.IsFenced(uid) {
-		msg := fmt.Sprintf("lcm: pod %s/%s (%s) was live-migrated away from this node or abandoned; refusing to start container %s", ns, pod, uid, ctr)
-		logf("%s", msg)
-		fmt.Fprintln(os.Stderr, msg)
-		os.Exit(1)
+	refuseIfFenced := func() {
+		if stage.IsFenced(uid) {
+			msg := fmt.Sprintf("lcm: pod %s/%s (%s) was live-migrated away from this node or abandoned; refusing to start container %s", ns, pod, uid, ctr)
+			logf("%s", msg)
+			fmt.Fprintln(os.Stderr, msg)
+			os.Exit(1)
+		}
+	}
+	refuseIfFenced()
+	// The source's final dump is under way: the images arrive within seconds. Wait here (not
+	// holding the lock, so a fence can still go through) rather than in the wait init container,
+	// so kubelet's container start-up overlaps the dump and transfer instead of following them.
+	if stage.RestorePending(key) {
+		t0, deadline := time.Now(), time.Now().Add(pendingTimeout)
+		for stage.RestorePending(key) {
+			unlock()
+			if time.Now().After(deadline) {
+				msg := fmt.Sprintf("lcm: the final checkpoint for %s was not staged within %s; failing this attempt (kubelet retries)", key, pendingTimeout)
+				logf("%s", msg)
+				fmt.Fprintln(os.Stderr, msg)
+				os.Exit(1)
+			}
+			time.Sleep(10 * time.Millisecond)
+			if unlock, err = stage.Lock(key.String()); err != nil {
+				fmt.Fprintln(os.Stderr, "lcm:", err)
+				os.Exit(1)
+			}
+			refuseIfFenced()
+		}
+		logf("create %s (%s): waited %dms for the final checkpoint", c.id, key, time.Since(t0).Milliseconds())
 	}
 	if !stage.IsReady(key) {
 		execRunc(os.Args[1:])
@@ -167,6 +196,9 @@ func create(inv invocation) {
 
 func restore(inv invocation, c createArgs, spec *ociSpec, key stage.Key) int {
 	res := api.RestoreResult{ContainerID: c.id, Started: time.Now()}
+	if fi, err := os.Stat(stage.ReadyFile(key)); err == nil {
+		res.ReadyAt = fi.ModTime()
+	}
 	defer func() {
 		res.Finished = time.Now()
 		// Keep CRIU's log: the staging dir lives in RAM and is dropped after the migration.

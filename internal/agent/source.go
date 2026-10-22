@@ -101,6 +101,13 @@ func (a *Agent) checkpoint(ctx context.Context, req api.CheckpointRequest, emit 
 
 	// Quiesce the in-container relay so the final dump holds no TCP connections to the outside.
 	relayed := false
+	// Tell the destination the final dump is next: its pod leaves the wait init container now and
+	// kubelet starts the container (lcm-runc then waits for READY) while we dump and ship.
+	if err := os.WriteFile(filepath.Join(dir, "FINAL"), nil, 0o644); err == nil {
+		if err := dst.putFile(ctx, filepath.Join(dir, "FINAL"), "FINAL"); err != nil {
+			return nil, fmt.Errorf("signalling the destination: %w", err)
+		}
+	}
 	if req.Relay != "off" {
 		switch err := relayctl.Command(st.Pid, "quiesce", 10*time.Second); {
 		case err == nil:

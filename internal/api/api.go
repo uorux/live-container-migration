@@ -70,6 +70,8 @@ type RestoreResult struct {
 	ContainerID string    `json:"containerID"`
 	Started     time.Time `json:"started"`
 	Finished    time.Time `json:"finished"`
+	// ReadyAt is when the staging was marked READY, on the same (destination) clock as Finished.
+	ReadyAt     time.Time `json:"readyAt,omitzero"`
 	RootfsMS    int64     `json:"rootfsMs"`
 	RestoreMS   int64     `json:"restoreMs"`
 	RelayResume string    `json:"relayResume,omitempty"`

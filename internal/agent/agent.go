@@ -506,8 +506,9 @@ func (a *Agent) handleWait(w http.ResponseWriter, r *http.Request) {
 	deadline := time.Now().Add(timeout)
 	for {
 		_, rerr := os.Stat(filepath.Join(dir, "READY"))
+		_, ferr := os.Stat(filepath.Join(dir, "FINAL")) // lcm-runc waits for READY from here
 		_, cerr := os.Stat(stage.ConsumedFile(r.PathValue("key")))
-		if rerr == nil || cerr == nil {
+		if rerr == nil || ferr == nil || cerr == nil {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}

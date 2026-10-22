@@ -228,9 +228,7 @@ restored:
 	if b, err := agentDo(ctx, dstURL, o.Token, http.MethodGet, "/v1/stage/"+key+"/result", nil); err == nil {
 		if json.Unmarshal(b, &rr) == nil {
 			res.Restore = &rr
-			if ck != nil && !ck.FreezeStart.IsZero() {
-				res.Blackout = rr.Finished.Sub(ck.FreezeStart)
-			}
+			res.Blackout = blackout(ck, &rr)
 		}
 	}
 	logf("restored on %s: restore %dms, relay resume %q, blackout %s", res.DestNode, rr.RestoreMS, rr.RelayResume, res.Blackout.Round(time.Millisecond))
@@ -254,6 +252,19 @@ restored:
 		return res, fmt.Errorf("restore on %s failed; rolled back, workload is running on %s as %s", o.TargetNode, res.DestNode, res.DestPod)
 	}
 	return res, nil
+}
+
+// blackout is final dump start to restore finished. Node clocks may disagree, so it is summed
+// from per-node durations: freeze to READY acknowledged (source clock) plus READY to restored
+// (destination clock). Older lcm-runc versions don't report ReadyAt; fall back to the clocks.
+func blackout(ck *api.CheckpointResult, rr *api.RestoreResult) time.Duration {
+	if ck == nil || ck.FreezeStart.IsZero() {
+		return 0
+	}
+	if !rr.ReadyAt.IsZero() && ck.FrozenMS > 0 {
+		return time.Duration(ck.FrozenMS)*time.Millisecond + rr.Finished.Sub(rr.ReadyAt)
+	}
+	return rr.Finished.Sub(ck.FreezeStart)
 }
 
 func deletePodAndWait(ctx context.Context, kc kubernetes.Interface, ns, name string) error {
