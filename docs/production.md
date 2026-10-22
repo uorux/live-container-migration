@@ -14,17 +14,17 @@ Cilium 1.20.2 VXLAN/cluster-pool/KPR, kernel 7.3). Not yet on the real nodes.
 Applying the NixOS module restarts k3s once per node (containerd only reads its drop-ins at
 start). Running pods are unaffected (their shims keep running), but do one node at a time.
 
-## Node facts to confirm first (read-only)
+## Node facts (checked 2026-10-22, read-only)
 
-- CPU model/flags identical on all three nodes (CRIU refuses to restore onto a CPU missing
-  features the dump used; otherwise pin `cpu-cap` or a JVM `-XX:UseAVX` level).
-- Kernel options: CHECKPOINT_RESTORE, MEM_SOFT_DIRTY (pre-copy), INET_DIAG_DESTROY (resetting
-  outbound sockets after the IP change), TIME_NS.
-- k3s containerd imports `config-v3.toml.d/*.toml` (the module drops the runtime handler there).
-- Free RAM: a migration stages roughly the workload's RSS in tmpfs on the destination (and the
-  first pre-dump on the source, freed as soon as it is shipped).
-- Tailscale node-to-node throughput: the first pre-copy round ships the whole heap while the
-  server keeps running; only the final delta is inside the blackout.
+All three nodes are crosvm/KVM guests with identical vCPUs: AMD Ryzen 7 5800H, 14 vCPU, identical
+`/proc/cpuinfo` flags (md5 2c24d45d…), 45 GiB RAM (27-31 GiB available), kernel 7.2.11 with
+CHECKPOINT_RESTORE, MEM_SOFT_DIRTY, USERFAULTFD, INET_DIAG_DESTROY and TIME_NS all `=y`. k3s's
+containerd config already imports `config-v3.toml.d/*.toml` (the dir doesn't exist yet; the module
+creates it). No `/etc/criu`. Ceph is mounted. => CPU compatibility is a non-issue, and every kernel
+feature the design uses is present.
+
+Still to check before enabling: the firewall backend and rules on the nodes (the module opens the
+agent port to the pod CIDR and the listed interfaces), and node-to-node throughput over Tailscale.
 
 ## Workload requirements (documented contract)
 
