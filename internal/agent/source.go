@@ -63,6 +63,41 @@ func (a *Agent) checkpoint(ctx context.Context, req api.CheckpointRequest, emit 
 		return nil, fmt.Errorf("destination agent: %w", err)
 	}
 
+	// Warm the destination's view of shared volumes while pre-copy runs (see warm.go).
+	warmed := map[string]bool{}
+	warmDone := make(chan struct{})
+	// warm returns an event for the caller to emit: the first pass runs concurrently with pre-copy.
+	warm := func(only func(string) bool) *api.Event {
+		if req.DestPodUID == "" {
+			return nil
+		}
+		paths, err := sharedFiles(st.Pid, st.Bundle, req.PodUID)
+		if err != nil {
+			a.log.Warn("listing shared files to warm", "migration", req.MigrationID, "err", err)
+			return nil
+		}
+		var todo []string
+		for _, p := range paths {
+			if only(p) {
+				todo = append(todo, p)
+			}
+		}
+		if len(todo) == 0 {
+			return nil
+		}
+		t0 := time.Now()
+		if err := dst.warm(ctx, warmRequest{PodUID: req.DestPodUID, Paths: todo}); err != nil {
+			a.log.Warn("warming shared files on the destination", "migration", req.MigrationID, "err", err)
+			return nil
+		}
+		for _, p := range todo {
+			warmed[p] = true
+		}
+		return &api.Event{Phase: "warm", Millis: since(t0), Message: fmt.Sprintf("%d shared files opened on the destination", len(todo))}
+	}
+	var warmEv *api.Event
+	go func() { defer close(warmDone); warmEv = warm(func(string) bool { return true }) }()
+
 	// Pre-copy rounds.
 	parent := ""
 	var prevBytes int64 = -1
@@ -101,6 +136,12 @@ func (a *Agent) checkpoint(ctx context.Context, req api.CheckpointRequest, emit 
 
 	// Quiesce the in-container relay so the final dump holds no TCP connections to the outside.
 	relayed := false
+	<-warmDone
+	for _, ev := range []*api.Event{warmEv, warm(func(p string) bool { return !warmed[p] })} { // + files opened since
+		if ev != nil {
+			emit(*ev)
+		}
+	}
 	// Tell the destination the final dump is next: its pod leaves the wait init container now and
 	// kubelet starts the container (lcm-runc then waits for READY) while we dump and ship.
 	if err := os.WriteFile(filepath.Join(dir, "FINAL"), nil, 0o644); err == nil {

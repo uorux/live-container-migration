@@ -179,7 +179,7 @@ func Migrate(ctx context.Context, kc kubernetes.Interface, o Options) (*Result, 
 
 	// 2. Checkpoint on the source, streamed progress.
 	req := api.CheckpointRequest{MigrationID: res.MigrationID, Namespace: o.Namespace, Pod: src.Name,
-		PodUID: string(src.UID), Container: ctrName, ContainerID: ctrID, DestKey: key, DestURL: shipURL, PreDump: o.PreDump, Relay: o.Relay, LazyRestore: o.LazyRestore}
+		PodUID: string(src.UID), Container: ctrName, ContainerID: ctrID, DestKey: key, DestURL: shipURL, DestPodUID: destUID, PreDump: o.PreDump, Relay: o.Relay, LazyRestore: o.LazyRestore}
 	ck, err := runCheckpoint(ctx, srcURL, o.Token, req, logf)
 	res.Checkpoint = ck
 	if err != nil {

@@ -17,9 +17,12 @@ type CheckpointRequest struct {
 	Container   string `json:"container"`
 	ContainerID string `json:"containerID"` // containerd id, without the "containerd://" prefix
 	// Key under which the destination stages the restore (namespace/destination pod/container).
-	DestKey string        `json:"destKey"`
-	DestURL string        `json:"destURL"` // base URL of the destination agent, e.g. http://10.0.0.2:7790
-	PreDump PreDumpPolicy `json:"preDump"`
+	DestKey string `json:"destKey"`
+	DestURL string `json:"destURL"` // base URL of the destination agent, e.g. http://10.0.0.2:7790
+	// DestPodUID is the parked destination pod's UID: its volumes are warmed through
+	// /var/lib/kubelet/pods/<uid> (see agent/warm.go). Optional.
+	DestPodUID string        `json:"destPodUID,omitempty"`
+	PreDump    PreDumpPolicy `json:"preDump"`
 	// LazyRestore restores with CRIU lazy pages (experimental): shorter blackout, memory
 	// faulted in after the process resumes.
 	LazyRestore bool `json:"lazyRestore,omitempty"`

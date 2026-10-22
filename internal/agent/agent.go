@@ -114,6 +114,7 @@ func (a *Agent) Handler() http.Handler {
 	mux.HandleFunc("DELETE /v1/stage/{key}", a.auth(a.handleDeleteStage))
 	mux.HandleFunc("POST /v1/stage/{key}/forward", a.auth(a.handleForward))
 	mux.HandleFunc("GET /v1/stage/{key}/wait", a.handleWait)
+	mux.HandleFunc("POST /v1/stage/{key}/warm", a.auth(a.handleWarm))
 	mux.HandleFunc("GET /v1/stage/{key}/result", a.auth(a.handleResult))
 	mux.HandleFunc("GET /v1/checkpoint/{id}", a.auth(a.handleCheckpointStatus))
 	mux.HandleFunc("DELETE /v1/ckpt/{id}", a.auth(a.handleDeleteCkpt))
