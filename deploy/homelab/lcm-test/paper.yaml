@@ -1,0 +1,51 @@
+# Throwaway Paper server for proving migration on the real nodes. World on CephFS (RWX) so both
+# nodes see the same files; the relay (fetched from the node agent) is the entrypoint.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: paper-data, namespace: lcm-test}
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: ceph-filesystem
+  resources: {requests: {storage: 10Gi}}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: paper
+  namespace: lcm-test
+  labels: {app: paper}
+spec:
+  runtimeClassName: lcm
+  initContainers:
+  - name: fetch-relay
+    image: busybox:1.37
+    command: ["sh", "-c", "wget -q -O /lcm/lcm-relay http://$HOST_IP:7790/v1/bin/lcm-relay && chmod +x /lcm/lcm-relay"]
+    env: [{name: HOST_IP, valueFrom: {fieldRef: {fieldPath: status.hostIP}}}]
+    volumeMounts: [{name: lcm-bin, mountPath: /lcm}]
+  containers:
+  - name: mc
+    image: itzg/minecraft-server:java21
+    command: ["/lcm/lcm-relay", "run", "-gateway", "lcm-gateway-tunnel.lcm-test.svc.cluster.local:7000",
+              "-token-file", "/secret/token", "-proxy-protocol=false", "-minecraft-ready", "--", "/start"]
+    env:
+    - {name: EULA, value: "TRUE"}
+    - {name: TYPE, value: PAPER}
+    - {name: VERSION, value: "1.21.10"}
+    - {name: MEMORY, value: 3G}
+    - {name: ONLINE_MODE, value: "TRUE"}
+    - {name: ENABLE_RCON, value: "FALSE"}
+    - {name: MOTD, value: "lcm-test (live migration)"}
+    # Keep JNA's deleted-but-open temp libs on the container rootfs, not CephFS (CRIU can't
+    # carry silly-renamed network-filesystem files).
+    - {name: JVM_OPTS, value: "-Djna.tmpdir=/tmp -Djava.io.tmpdir=/tmp"}
+    resources:
+      requests: {cpu: "2", memory: 4Gi}
+      limits: {memory: 5Gi}
+    volumeMounts:
+    - {name: data, mountPath: /data}
+    - {name: lcm-bin, mountPath: /lcm}
+    - {name: secret, mountPath: /secret, readOnly: true}
+  volumes:
+  - {name: data, persistentVolumeClaim: {claimName: paper-data}}
+  - {name: lcm-bin, emptyDir: {}}
+  - {name: secret, secret: {secretName: lcm-tunnel}}

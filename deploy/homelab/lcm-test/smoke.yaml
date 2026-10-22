@@ -1,0 +1,61 @@
+# Loopback pair (must survive a migration untouched) + an outbound connection to echo-srv (must be
+# reset after the migration, then reconnect). Logs show which happened.
+apiVersion: v1
+kind: Pod
+metadata: {name: echo-srv, namespace: lcm-test, labels: {app: echo-srv}}
+spec:
+  containers:
+  - name: c
+    image: python:3.13-alpine
+    command: ["python3", "-u", "-c"]
+    args:
+    - |
+      import socketserver
+      class H(socketserver.BaseRequestHandler):
+          def handle(self):
+              while (d := self.request.recv(65536)): self.request.sendall(d)
+      socketserver.ThreadingTCPServer.allow_reuse_address = True
+      socketserver.ThreadingTCPServer(("0.0.0.0", 9000), H).serve_forever()
+---
+apiVersion: v1
+kind: Service
+metadata: {name: echo-srv, namespace: lcm-test}
+spec: {selector: {app: echo-srv}, ports: [{port: 9000}]}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: tcpm, namespace: lcm-test, labels: {app: tcpm}}
+spec:
+  runtimeClassName: lcm
+  containers:
+  - name: c
+    image: python:3.13-alpine
+    command: ["python3", "-u", "-c"]
+    args:
+    - |
+      import socket, threading, time
+      srv = socket.socket(); srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+      srv.bind(("127.0.0.1", 9000)); srv.listen()
+      def serve():
+          c, _ = srv.accept()
+          while (d := c.recv(65536)): c.sendall(d)
+      threading.Thread(target=serve, daemon=True).start()
+      def pinger(name, addr):
+          i = 0
+          while True:
+              try:
+                  s = socket.create_connection(addr, timeout=5); s.settimeout(5)
+                  print(f"{name}: connected from {s.getsockname()}", flush=True)
+                  while True:
+                      m = f"{i:010d}".encode(); s.sendall(m); got = b""
+                      while len(got) < len(m):
+                          d = s.recv(len(m) - len(got))
+                          if not d: raise ConnectionError("eof")
+                          got += d
+                      assert got == m
+                      if i % 100 == 0: print(f"{name}: i={i}", flush=True)
+                      i += 1; time.sleep(0.02)
+              except Exception as e:
+                  print(f"{name}: {type(e).__name__}: {e} -- reconnecting", flush=True); time.sleep(0.5)
+      threading.Thread(target=pinger, args=("outbound", ("echo-srv", 9000)), daemon=True).start()
+      pinger("loopback", ("127.0.0.1", 9000))

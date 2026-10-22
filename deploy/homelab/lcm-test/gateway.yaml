@@ -1,0 +1,52 @@
+# lcm-gateway holds players' TCP connections while the server behind it migrates between nodes.
+# Secret lcm-tunnel/token must exist (provide it via the homelab's secret tooling).
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: lcm-gateway, namespace: lcm-test, labels: {app: lcm-gateway}}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: lcm-gateway}}
+  template:
+    metadata: {labels: {app: lcm-gateway}}
+    spec:
+      initContainers:
+      - name: fetch
+        image: busybox:1.37
+        command: ["sh", "-c", "wget -q -O /lcm/lcm-gateway http://$HOST_IP:7790/v1/bin/lcm-gateway && chmod +x /lcm/lcm-gateway"]
+        env: [{name: HOST_IP, valueFrom: {fieldRef: {fieldPath: status.hostIP}}}]
+        volumeMounts: [{name: bin, mountPath: /lcm}]
+      containers:
+      - name: gateway
+        image: busybox:1.37
+        command: ["/lcm/lcm-gateway", "-listen", ":25565", "-tunnel-listen", ":7000", "-admin-listen", ":8080",
+                  "-token-file", "/secret/token", "-minecraft", "-motd", "lcm-test: starting..."]
+        ports: [{containerPort: 25565, name: mc}, {containerPort: 7000, name: tunnel}, {containerPort: 8080, name: admin}]
+        readinessProbe: {httpGet: {path: /healthz, port: 8080}}
+        resources: {requests: {cpu: 50m, memory: 64Mi}, limits: {memory: 512Mi}}
+        volumeMounts: [{name: bin, mountPath: /lcm}, {name: secret, mountPath: /secret, readOnly: true}]
+      volumes:
+      - {name: bin, emptyDir: {}}
+      - {name: secret, secret: {secretName: lcm-tunnel}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: lcm-gateway, namespace: lcm-test}
+spec:
+  type: LoadBalancer
+  selector: {app: lcm-gateway}
+  ports: [{name: mc, port: 25565, targetPort: mc}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: lcm-gateway-admin, namespace: lcm-test}
+spec:
+  selector: {app: lcm-gateway}
+  ports: [{name: admin, port: 8080, targetPort: admin}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: lcm-gateway-tunnel, namespace: lcm-test}
+spec:
+  selector: {app: lcm-gateway}
+  ports: [{name: tunnel, port: 7000, targetPort: tunnel}]
