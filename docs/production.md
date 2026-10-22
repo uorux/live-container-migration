@@ -3,13 +3,21 @@
 Status 2026-10-22: proven in the lab (3 NixOS VMs mirroring prod: k3s 1.36.5, containerd 2.3.4,
 Cilium 1.20.2 VXLAN/cluster-pool/KPR, kernel 7.3). Not yet on the real nodes.
 
-## Status (2026-10-22)
+## Status (2026-10-22, overnight)
 
-- nixos-dots: https://github.com/otisdog8/nixos-dots/pull/14 (opened by Hermes from
-  uorux/nixos-docs-agent-fork branch feat/live-container-migration).
-- homelab: https://github.com/uorux/homelab/pull/370 (draft; merge after the NixOS rollout; needs the
-  1Password item `lcm-test-tunnel`/`token` and confirmation of LB IP 10.0.0.201).
-- Then: smoke test, Paper test server with bots, Jacob with a real client.
+Live on all three nodes (nixos-dots #14 + the drop-in fix; homelab #370): agents, `lcm`
+RuntimeClass, gateway at 10.0.0.201 / NodePort 31956, Paper test server in `lcm-test`.
+
+Production results:
+- smoke workload: 6/6 hops across all node pairs, 0.9-4.0 s blackouts, loopback continuity
+  intact, outbound connections reset + reconnected;
+- Paper (3 GiB heap) with Jacob connected: he stayed connected through a 23 s freeze. Without
+  players: 8.8-9.0 s. First move onto a node: 45 s (15 s image pull + 25 s cold CephFS reads).
+
+Fixes for all of that are merged in this repo (9c7a06c) and waiting on the nixos-dots branch
+`uorux:feat/lcm-speed-and-restart-safety` (lock bump only; restarts lcm-agent, not k3s):
+compressed transfers, `file-validation filesize`, image pre-pull, restart safety. In the lab
+with the link throttled to the tailnet's ~50 MB/s they give 0.2-3 s blackouts with bots.
 
 ## What changes where
 

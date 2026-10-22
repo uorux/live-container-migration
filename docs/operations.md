@@ -58,6 +58,27 @@ the metric HELP text for the exact list.
 | `LcmStagingNotCleaned` | warning | Checkpoint images have sat in RAM for 30 min with nothing in flight: a failed migration left them. If `lcm history` shows no failed migration needing them, delete `/var/lib/lcm/{ckpt,restore}/*` on that node. |
 | `LcmAgentVersionSkew` | warning | Nodes run different lcm versions; finish the rollout before migrating. |
 
+## Failure behaviour (what happens when things break mid-migration)
+
+| What breaks | When | Outcome |
+| --- | --- | --- |
+| anything (CRIU error, network, destination agent) | before the final dump | migration aborts; the source never stopped; the relay resumes; players see nothing |
+| the source `lcm-agent` restarts | before the final dump | its runc/CRIU keep running (`KillMode=process`); the restarted agent aborts the migration and lifts the fence; the CLI learns this by polling |
+| the source `lcm-agent` restarts | during/after the final dump | runc finishes the dump; the restarted agent ships it and marks the destination ready; the parked destination pod restores (tested in the lab with players connected: no disconnects) |
+| shipping fails | after the final dump | retried 4x; then the CLI reports where the images are (final dump on the source, pre-dumps on the destination) |
+| the restore fails on the destination | after shipping | the destination pod is fenced, the images are forwarded back, the workload is restored on the source node (~10-15 s freeze) |
+| the CLI dies / its connection drops | any time | nothing stops; re-run `lcm history`/`lcm status` to see the outcome; leftover destination pods carry the `lcm.rooty.dev/migration-id` annotation |
+
+## Performance knobs
+
+- Transfers are zstd-compressed (JVM heap pages compress 6-8x); on links slower than ~1 GB/s
+  this is the single biggest factor for pre-copy convergence and the final ship.
+- `--predump-max` / `--predump-target`: more rounds help only while each round shrinks.
+- `--transfer-network CIDR`: ship over agent addresses in this network instead of the node
+  InternalIPs (e.g. a LAN faster than the tailnet). The LAN must be allowed to reach port 7790.
+- `--lazy-restore` (experimental): CRIU lazy pages; the process resumes before its memory is
+  loaded. Works in the lab, but wasn't faster there than eager restores.
+
 ## Debugging a migration
 
 1. `lcm history` — outcome and error message; the error always says which node holds what.
