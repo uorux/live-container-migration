@@ -53,10 +53,11 @@ panel("timeseries", "Restores / checkpoints", [
 nextrow()
 
 row("Players (lcm-gateway)")
-panel("timeseries", "Players", [('sum by (namespace) (lcm_gateway_players)', "connected {{namespace}}"),
-                                ('sum by (namespace) (lcm_gateway_held_players)', "held {{namespace}}")], 0, 8)
-panel("state-timeline", "Server connected to gateway", [('max by (namespace) (lcm_gateway_tunnel_up)', "{{namespace}}")], 8, 8,
-      desc="1 while the relay inside the server is connected; drops during each migration.")
+panel("timeseries", "Players", [('sum by (backend) (lcm_gateway_players)', "connected {{backend}}"),
+                                ('sum by (backend) (lcm_gateway_held_players)', "held {{backend}}")], 0, 8,
+      desc="Summed over gateways (one per ingress). Held: waiting for a migration, or for an on-demand server to boot.")
+panel("state-timeline", "Server connected to gateway", [('min by (backend) (lcm_gateway_tunnel_up)', "{{backend}}")], 8, 8,
+      desc="1 while the relay inside the server is connected to every gateway; drops during each migration and while asleep.")
 panel("timeseries", "Player connections", [('sum by (result) (increase(lcm_gateway_player_connections_total[$__rate_interval]))', "{{result}}")],
       16, 8, desc="session_lost = the server restarted fresh instead of resuming (a failed migration or a crash).")
 nextrow()
@@ -82,6 +83,11 @@ panel("state-timeline", "LivePod running", [('max by (namespace, livepod) (lcm_l
 panel("table", "Where each LivePod runs", [('max by (namespace, livepod, node, phase) (lcm_livepod_running)', "")], 12, 12,
       desc="Reported by the leading controller.", options={"showHeader": True},
       transformations=[{"id": "labelsToFields"}, {"id": "organize", "options": {"excludeByName": {"Time": True, "Value": True}}}])
+nextrow()
+panel("timeseries", "On-demand wakes", [('sum by (backend, result) (increase(lcm_gateway_wakes_total[$__rate_interval]))', "{{backend}} {{result}}")], 0, 12,
+      desc="A player arrived for an asleep server and a gateway asked the agents to start it. Errors: no agent with the LivePod controller reachable, or no on-demand LivePod for that backend.")
+panel("state-timeline", "On-demand LivePods asleep", [('max by (namespace, livepod) (lcm_livepod_running{phase=~"Asleep|Sleeping"} + 1)', "{{namespace}}/{{livepod}}")], 12, 12,
+      desc="Shown while asleep (stopped for idleness) or shutting down to sleep.")
 nextrow()
 
 dash = {"title": "Live container migration", "uid": "lcm", "tags": ["lcm", "minecraft"], "timezone": "browser",

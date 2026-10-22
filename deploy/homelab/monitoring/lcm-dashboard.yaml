@@ -287,7 +287,7 @@ data:
         {
           "type": "timeseries",
           "title": "Players",
-          "description": "",
+          "description": "Summed over gateways (one per ingress). Held: waiting for a migration, or for an on-demand server to boot.",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -304,8 +304,8 @@ data:
                 "type": "prometheus",
                 "uid": "prometheus"
               },
-              "expr": "sum by (namespace) (lcm_gateway_players)",
-              "legendFormat": "connected {{namespace}}",
+              "expr": "sum by (backend) (lcm_gateway_players)",
+              "legendFormat": "connected {{backend}}",
               "refId": "A"
             },
             {
@@ -313,8 +313,8 @@ data:
                 "type": "prometheus",
                 "uid": "prometheus"
               },
-              "expr": "sum by (namespace) (lcm_gateway_held_players)",
-              "legendFormat": "held {{namespace}}",
+              "expr": "sum by (backend) (lcm_gateway_held_players)",
+              "legendFormat": "held {{backend}}",
               "refId": "B"
             }
           ],
@@ -327,7 +327,7 @@ data:
         {
           "type": "state-timeline",
           "title": "Server connected to gateway",
-          "description": "1 while the relay inside the server is connected; drops during each migration.",
+          "description": "1 while the relay inside the server is connected to every gateway; drops during each migration and while asleep.",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -344,8 +344,8 @@ data:
                 "type": "prometheus",
                 "uid": "prometheus"
               },
-              "expr": "max by (namespace) (lcm_gateway_tunnel_up)",
-              "legendFormat": "{{namespace}}",
+              "expr": "min by (backend) (lcm_gateway_tunnel_up)",
+              "legendFormat": "{{backend}}",
               "refId": "A"
             }
           ],
@@ -705,6 +705,68 @@ data:
               }
             }
           ]
+        },
+        {
+          "type": "timeseries",
+          "title": "On-demand wakes",
+          "description": "A player arrived for an asleep server and a gateway asked the agents to start it. Errors: no agent with the LivePod controller reachable, or no on-demand LivePod for that backend.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 46,
+            "w": 12,
+            "h": 7
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum by (backend, result) (increase(lcm_gateway_wakes_total[$__rate_interval]))",
+              "legendFormat": "{{backend}} {{result}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {},
+            "overrides": []
+          },
+          "options": {}
+        },
+        {
+          "type": "state-timeline",
+          "title": "On-demand LivePods asleep",
+          "description": "Shown while asleep (stopped for idleness) or shutting down to sleep.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 12,
+            "y": 46,
+            "w": 12,
+            "h": 7
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "max by (namespace, livepod) (lcm_livepod_running{phase=~\"Asleep|Sleeping\"} + 1)",
+              "legendFormat": "{{namespace}}/{{livepod}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {},
+            "overrides": []
+          },
+          "options": {}
         }
       ],
       "description": "uorux/live-container-migration \u2014 runbook: docs/operations.md"
