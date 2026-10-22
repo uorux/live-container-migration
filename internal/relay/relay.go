@@ -425,20 +425,8 @@ func (r *Relay) Quiesce(ctx context.Context) error {
 		return fmt.Errorf("waiting for upstream dials: %w", ctx.Err())
 	}
 	if r.cfg.CheckSockets {
-		for {
-			socks, err := NonLoopbackSockets()
-			if err != nil {
-				r.log.Warn("socket check unavailable", "err", err)
-				break
-			}
-			if len(socks) == 0 {
-				break
-			}
-			select {
-			case <-ctx.Done():
-				return fmt.Errorf("non-loopback sockets remain: %v", socks)
-			case <-time.After(20 * time.Millisecond):
-			}
+		if err := waitNoSockets(ctx, r.log); err != nil {
+			return err
 		}
 	}
 	r.setState("quiesced")
@@ -493,6 +481,7 @@ func (r *Relay) Shutdown(timeout time.Duration) {
 // Status is the control socket's status document.
 type Status struct {
 	Session        string    `json:"session"`
+	Gateway        string    `json:"gateway"`
 	State          string    `json:"state"`
 	Connected      bool      `json:"connected"`
 	Streams        int       `json:"streams"`
@@ -511,7 +500,7 @@ func (r *Relay) Status() Status {
 	s := r.sess.Stats()
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	st := Status{Session: r.SessionID(), State: r.state, Connected: s.Connected, Streams: s.Streams,
+	st := Status{Gateway: r.cfg.Gateway, Session: r.SessionID(), State: r.state, Connected: s.Connected, Streams: s.Streams,
 		Connects: s.Connects, Disconnects: s.Disconnects, LastConnect: s.LastConnect,
 		LastDisconnect: s.LastDisconnect, LastError: r.lastErr, ChildPID: r.ChildPID.Load(), Ready: r.ready.Load()}
 	if r.quiesced {

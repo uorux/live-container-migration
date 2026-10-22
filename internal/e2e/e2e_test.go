@@ -3,12 +3,18 @@ package e2e
 import (
 	"context"
 	"fmt"
+	"io"
+	"net"
+	"net/netip"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"lcm/internal/gateway"
 	"lcm/internal/loadtest"
+	"lcm/internal/proxyproto"
 	"lcm/internal/relay"
 )
 
@@ -339,4 +345,84 @@ func TestFinalGoAway(t *testing.T) {
 		}
 	}
 	h.waitFor("gateway streams closed", 5*time.Second, func() bool { return h.gwStats().Streams == 0 })
+}
+
+// One server reached through two gateways (two ingresses): players on both stay
+// connected across a group quiesce/resume, and both tunnels resume.
+func TestGroupTwoGateways(t *testing.T) {
+	h1, h2 := newHarness(t, 256<<10), newHarness(t, 256<<10)
+	ctl := filepath.Join(t.TempDir(), "relay.sock")
+	g := relay.NewGroup(relay.Config{
+		Upstream: h1.echo.Addr(), ProxyProtocol: true,
+		Tunnel: tunnelCfg(256 << 10), QuiesceTimeout: time.Minute, CheckSockets: true,
+		BackoffMin: 20 * time.Millisecond, BackoffMax: 200 * time.Millisecond, Logger: logger(),
+	}, []string{h1.proxy.addr(), h2.proxy.addr()})
+	ln, err := relay.ListenControl(ctl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go g.ServeControl(ln)
+	rctx, rcancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { g.Run(rctx); close(done) }()
+	defer func() { rcancel(); <-done }()
+	h1.waitFor("tunnel 1", 5*time.Second, func() bool { return h1.gwStats().Connected })
+	h2.waitFor("tunnel 2", 5*time.Second, func() bool { return h2.gwStats().Connected })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	slow := func(i int, c *loadtest.PlayerConfig) { c.Bytes, c.Rate = 3<<20, 1<<20 }
+	p1, p2 := h1.players(ctx, 3, 300, slow), h2.players(ctx, 3, 400, slow)
+	time.Sleep(500 * time.Millisecond)
+	if r := control(t, ctl, "quiesce"); r != "ok" {
+		t.Fatalf("quiesce: %q", r)
+	}
+	if (h1.gwStats().Connected && !waitDisconnected(h1)) || (h2.gwStats().Connected && !waitDisconnected(h2)) {
+		t.Fatal("a gateway still sees its tunnel after quiesce")
+	}
+	if socks, err := relay.NonLoopbackSockets(); err == nil && len(socks) > 0 {
+		t.Fatalf("non-loopback sockets after quiesce: %v", socks)
+	}
+	v1, v2 := p1.verified.Load(), p2.verified.Load()
+	time.Sleep(time.Second)
+	if p1.verified.Load() != v1 || p2.verified.Load() != v2 {
+		t.Fatal("bytes flowed while quiesced")
+	}
+	if r := control(t, ctl, "resume"); r != "ok" {
+		t.Fatalf("resume: %q", r)
+	}
+	p1.wait(t)
+	p2.wait(t)
+	if h1.gwStats().Connects != 2 || h2.gwStats().Connects != 2 {
+		t.Fatalf("connects %d / %d", h1.gwStats().Connects, h2.gwStats().Connects)
+	}
+	if r := control(t, ctl, "status"); !strings.Contains(r, `"gateways":[`) {
+		t.Fatalf("status: %q", r)
+	}
+}
+
+// A player arriving through a trusted PROXY v2 sender (HAProxy on the ingress)
+// reaches the server with the address from that header, not the sender's.
+func TestAcceptProxyFromIngress(t *testing.T) {
+	h := newHarnessCfg(t, 256<<10, gateway.Config{AcceptProxy: []netip.Prefix{netip.MustParsePrefix("127.0.0.1/32")}})
+	h.startRelay(nil)
+	h.waitFor("tunnel", 5*time.Second, func() bool { return h.gwStats().Connected })
+	c, err := net.Dial("tcp", h.playerAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	player := netip.MustParseAddrPort("203.0.113.7:51234")
+	c.Write(proxyproto.Header(player, netip.MustParseAddrPort("198.51.100.1:25565")))
+	c.Write([]byte("hello"))
+	buf := make([]byte, 5)
+	c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := io.ReadFull(c, buf); err != nil || string(buf) != "hello" {
+		t.Fatalf("echo: %q %v", buf, err)
+	}
+	hs := h.echo.Headers()
+	if len(hs) != 1 || hs[0].Src != player {
+		t.Fatalf("server saw %+v, want source %v", hs, player)
+	}
 }

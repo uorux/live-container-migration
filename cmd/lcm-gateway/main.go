@@ -9,9 +9,11 @@ import (
 	"flag"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -40,6 +42,7 @@ func main() {
 	holdInterval := flag.Duration("hold-interval", 10*time.Second, "keepalive interval for held logins; must stay well under the client's 30 s timeout (-minecraft)")
 	holdMax := flag.Duration("hold-max", 5*time.Minute, "kick a held login with -hold-message after this long (-minecraft)")
 	holdMessage := flag.String("hold-message", "The server did not start in time. Please try again later.", "Login Disconnect text when -hold-max passes (-minecraft)")
+	acceptProxy := flag.String("accept-proxy", cliutil.EnvDefault("LCM_ACCEPT_PROXY", ""), "comma-separated CIDRs (e.g. 127.0.0.1/32 for a local HAProxy with send-proxy-v2) whose player connections start with a PROXY v2 header (env LCM_ACCEPT_PROXY)")
 	logLevel := flag.String("log-level", cliutil.EnvDefault("LCM_LOG_LEVEL", "info"), "debug|info|warn|error")
 	flag.Parse()
 
@@ -54,12 +57,25 @@ func main() {
 		mc = &gateway.MinecraftConfig{MOTD: *motd, VersionName: *statusVersion,
 			HoldInterval: *holdInterval, MaxHold: *holdMax, HoldMessage: *holdMessage}
 	}
+	var trusted []netip.Prefix
+	for _, c := range strings.Split(*acceptProxy, ",") {
+		if c = strings.TrimSpace(c); c == "" {
+			continue
+		}
+		p, err := netip.ParsePrefix(c)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "lcm-gateway: -accept-proxy:", err)
+			os.Exit(2)
+		}
+		trusted = append(trusted, p)
+	}
 	g := gateway.New(gateway.Config{
-		Backend:   *backend,
-		Logger:    log,
-		Minecraft: mc,
-		Version:   version,
-		Tunnel:    tunnel.Config{Token: tok, Window: int(window), PingInterval: *ping, DeadTimeout: *dead},
+		AcceptProxy: trusted,
+		Backend:     *backend,
+		Logger:      log,
+		Minecraft:   mc,
+		Version:     version,
+		Tunnel:      tunnel.Config{Token: tok, Window: int(window), PingInterval: *ping, DeadTimeout: *dead},
 	})
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()

@@ -4,10 +4,12 @@
 package gateway
 
 import (
+	"bufio"
 	"context"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -16,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"lcm/internal/proxyproto"
 	"lcm/internal/tunnel"
 	"lcm/internal/wire"
 )
@@ -30,7 +33,11 @@ type Config struct {
 	// first packets of each connection (local status while the backend is
 	// down, login hold). Nil keeps the gateway pure L4.
 	Minecraft *MinecraftConfig
-	Logger    *slog.Logger
+	// AcceptProxy lists the sources (e.g. a local HAProxy with send-proxy-v2)
+	// whose connections start with a PROXY v2 header carrying the player's
+	// real address. Connections from other sources are taken as direct.
+	AcceptProxy []netip.Prefix
+	Logger      *slog.Logger
 	// Version is reported by lcm_gateway_build_info and /status ("dev" if empty).
 	Version string
 }
@@ -130,12 +137,69 @@ func (g *Gateway) ServePlayers(ln net.Listener, b *Backend) error {
 			time.Sleep(50 * time.Millisecond)
 			continue
 		}
-		if g.cfg.Minecraft != nil {
-			go g.handleMinecraft(c, b)
-			continue
-		}
-		g.addStream(b, c, "l4", g.log.With("src", c.RemoteAddr().String()))
+		go g.handlePlayer(c, b)
 	}
+}
+
+func (g *Gateway) handlePlayer(c net.Conn, b *Backend) {
+	if g.trustedProxy(c.RemoteAddr()) {
+		pc, err := readProxyHeader(c)
+		if err != nil {
+			g.log.Warn("PROXY header from a trusted source", "src", c.RemoteAddr().String(), "err", err)
+			c.Close()
+			return
+		}
+		c = pc
+	}
+	if g.cfg.Minecraft != nil {
+		g.handleMinecraft(c, b)
+		return
+	}
+	g.addStream(b, c, "l4", g.log.With("src", c.RemoteAddr().String()))
+}
+
+func (g *Gateway) trustedProxy(a net.Addr) bool {
+	ap := addrPort(a)
+	for _, p := range g.cfg.AcceptProxy {
+		if p.Contains(ap.Addr()) {
+			return true
+		}
+	}
+	return false
+}
+
+// proxiedConn is a player connection that arrived through a PROXY-protocol
+// sender: it reports the addresses from the header and replays bytes the
+// header read buffered.
+type proxiedConn struct {
+	*net.TCPConn
+	r        *bufio.Reader
+	src, dst net.Addr
+}
+
+func (p *proxiedConn) Read(b []byte) (int, error) { return p.r.Read(b) }
+func (p *proxiedConn) RemoteAddr() net.Addr       { return p.src }
+func (p *proxiedConn) LocalAddr() net.Addr        { return p.dst }
+
+var _ tunnel.TCPLike = (*proxiedConn)(nil)
+
+func readProxyHeader(c net.Conn) (net.Conn, error) {
+	tc, ok := c.(*net.TCPConn)
+	if !ok {
+		return nil, fmt.Errorf("not a TCP connection")
+	}
+	tc.SetReadDeadline(time.Now().Add(5 * time.Second))
+	br := bufio.NewReader(tc)
+	info, err := proxyproto.Read(br)
+	tc.SetReadDeadline(time.Time{})
+	if err != nil {
+		return nil, err
+	}
+	pc := &proxiedConn{TCPConn: tc, r: br, src: tc.RemoteAddr(), dst: tc.LocalAddr()}
+	if !info.Local {
+		pc.src, pc.dst = net.TCPAddrFromAddrPort(info.Src), net.TCPAddrFromAddrPort(info.Dst)
+	}
+	return pc, nil
 }
 
 // addStream hands a player connection to the backend's session.

@@ -131,8 +131,13 @@ type relayHandle struct {
 }
 
 func newHarness(t *testing.T, window int) *harness {
+	return newHarnessCfg(t, window, gateway.Config{})
+}
+
+func newHarnessCfg(t *testing.T, window int, cfg gateway.Config) *harness {
 	h := &harness{t: t, window: window}
-	h.gw = gateway.New(gateway.Config{Tunnel: tunnelCfg(window), Logger: logger()})
+	cfg.Tunnel, cfg.Logger = tunnelCfg(window), logger()
+	h.gw = gateway.New(cfg)
 	pl, err := gateway.Listen(context.Background(), "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

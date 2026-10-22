@@ -56,7 +56,7 @@ func main() {
 
 func run(args []string) int {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
-	gw := fs.String("gateway", cliutil.EnvDefault("LCM_GATEWAY", ""), "gateway tunnel address host:port (env LCM_GATEWAY)")
+	gw := fs.String("gateway", cliutil.EnvDefault("LCM_GATEWAY", ""), "gateway tunnel address host:port, or several comma-separated (one per ingress; env LCM_GATEWAY)")
 	backend := fs.String("backend", cliutil.EnvDefault("LCM_BACKEND", "default"), "backend name (env LCM_BACKEND)")
 	upstream := fs.String("upstream", cliutil.EnvDefault("LCM_UPSTREAM", "127.0.0.1:25565"), "server address, loopback (env LCM_UPSTREAM)")
 	proxyProto := fs.Bool("proxy-protocol", true, "send a PROXY v2 header on each upstream connection")
@@ -94,12 +94,18 @@ func run(args []string) int {
 			ready = relay.ReadyMinecraft
 		}
 	}
-	r := relay.New(relay.Config{
-		Gateway: *gw, Backend: *backend, Upstream: *upstream, ProxyProtocol: *proxyProto,
+	var gateways []string
+	for _, a := range strings.Split(*gw, ",") {
+		if a = strings.TrimSpace(a); a != "" {
+			gateways = append(gateways, a)
+		}
+	}
+	r := relay.NewGroup(relay.Config{
+		Backend: *backend, Upstream: *upstream, ProxyProtocol: *proxyProto,
 		Ready: ready, ReadyInterval: *readyInterval,
 		QuiesceTimeout: *quiesceTimeout, CheckSockets: *checkSockets, Logger: log,
 		Tunnel: tunnel.Config{Token: tok, Window: int(window), PingInterval: *ping, DeadTimeout: *dead},
-	})
+	}, gateways)
 
 	// Signals: forward to the child; without a child, terminate on TERM/INT.
 	sigs := make(chan os.Signal, 8)
@@ -112,7 +118,7 @@ func run(args []string) int {
 			log.Error("cannot start server", "cmd", cmd, "err", err)
 			return 127
 		}
-		r.ChildPID.Store(int64(child.Pid))
+		r.SetChildPID(child.Pid)
 		log.Info("server started", "pid", child.Pid, "cmd", strings.Join(cmd, " "))
 	}
 
@@ -129,7 +135,7 @@ func run(args []string) int {
 	ctx, cancel := context.WithCancel(context.Background())
 	runDone := make(chan struct{})
 	go func() { r.Run(ctx); close(runDone) }()
-	log.Info("relay started", "session", r.SessionID(), "gateway", *gw, "upstream", *upstream, "ready_check", ready.String())
+	log.Info("relay started", "gateways", gateways, "upstream", *upstream, "ready_check", ready.String())
 
 	var childDone <-chan struct{}
 	if child != nil {

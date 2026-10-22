@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -42,6 +43,21 @@ func ListenControl(path string) (net.Listener, error) {
 //
 // Errors are reported as "error <message>".
 func (r *Relay) ServeControl(ln net.Listener) error {
+	return serveControl(ln, r.log, relayTarget{r})
+}
+
+// controlTarget is what the control socket drives: one Relay or a Group.
+type controlTarget interface {
+	Quiesce(ctx context.Context) error
+	Resume()
+	Status() any
+}
+
+type relayTarget struct{ *Relay }
+
+func (t relayTarget) Status() any { return t.Relay.Status() }
+
+func serveControl(ln net.Listener, log *slog.Logger, t controlTarget) error {
 	var mu sync.Mutex // serialise commands across connections
 	for {
 		c, err := ln.Accept()
@@ -49,15 +65,15 @@ func (r *Relay) ServeControl(ln net.Listener) error {
 			if errors.Is(err, net.ErrClosed) {
 				return nil
 			}
-			r.log.Error("control accept", "err", err)
+			log.Error("control accept", "err", err)
 			time.Sleep(50 * time.Millisecond)
 			continue
 		}
-		go r.handleControl(c, &mu)
+		go handleControl(c, &mu, t)
 	}
 }
 
-func (r *Relay) handleControl(c net.Conn, mu *sync.Mutex) {
+func handleControl(c net.Conn, mu *sync.Mutex, t controlTarget) {
 	defer c.Close()
 	sc := bufio.NewScanner(c)
 	for sc.Scan() {
@@ -66,7 +82,7 @@ func (r *Relay) handleControl(c net.Conn, mu *sync.Mutex) {
 			continue
 		}
 		mu.Lock()
-		reply, closeAfter := r.command(cmd)
+		reply, closeAfter := command(t, cmd)
 		mu.Unlock()
 		if _, err := c.Write([]byte(reply + "\n")); err != nil {
 			return
@@ -80,20 +96,20 @@ func (r *Relay) handleControl(c net.Conn, mu *sync.Mutex) {
 	}
 }
 
-func (r *Relay) command(cmd string) (reply string, closeAfter bool) {
+func command(t controlTarget, cmd string) (reply string, closeAfter bool) {
 	switch cmd {
 	case "quiesce":
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if err := r.Quiesce(ctx); err != nil {
+		if err := t.Quiesce(ctx); err != nil {
 			return "error " + oneLine(err.Error()), true
 		}
 		return "ok", true
 	case "resume":
-		r.Resume()
+		t.Resume()
 		return "ok", false
 	case "status":
-		b, _ := json.Marshal(r.Status())
+		b, _ := json.Marshal(t.Status())
 		return string(b), false
 	default:
 		return "error unknown command " + oneLine(cmd), false
