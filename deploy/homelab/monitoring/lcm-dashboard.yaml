@@ -615,6 +615,96 @@ data:
               "id": "merge"
             }
           ]
+        },
+        {
+          "type": "row",
+          "title": "LivePods",
+          "collapsed": false,
+          "gridPos": {
+            "x": 0,
+            "y": 38,
+            "w": 24,
+            "h": 1
+          },
+          "panels": []
+        },
+        {
+          "type": "state-timeline",
+          "title": "LivePod running",
+          "description": "1 while the LivePod's pod is Running (LcmLivePodNotRunning after 10 min at 0).",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 39,
+            "w": 12,
+            "h": 7
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "max by (namespace, livepod) (lcm_livepod_running)",
+              "legendFormat": "{{namespace}}/{{livepod}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {},
+            "overrides": []
+          },
+          "options": {}
+        },
+        {
+          "type": "table",
+          "title": "Where each LivePod runs",
+          "description": "Reported by the leading controller.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 12,
+            "y": 39,
+            "w": 12,
+            "h": 7
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "max by (namespace, livepod, node, phase) (lcm_livepod_running)",
+              "legendFormat": "",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {},
+            "overrides": []
+          },
+          "options": {
+            "showHeader": true
+          },
+          "transformations": [
+            {
+              "id": "labelsToFields"
+            },
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {
+                  "Time": true,
+                  "Value": true
+                }
+              }
+            }
+          ]
         }
       ],
       "description": "uorux/live-container-migration \u2014 runbook: docs/operations.md"

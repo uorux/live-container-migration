@@ -22,6 +22,7 @@ import (
 	"lcm/internal/api"
 	"lcm/internal/livepod"
 	"lcm/internal/logship"
+	"lcm/internal/metrics"
 	"lcm/internal/stage"
 )
 
@@ -69,6 +70,25 @@ func main() {
 		}
 		lc := &livepod.Controller{Kube: kubernetes.NewForConfigOrDie(cfg), Dyn: dynamic.NewForConfigOrDie(cfg), Log: log}
 		go lc.Run(context.Background(), livepod.Identity())
+		reg := a.Metrics()
+		reg.GaugeFunc("lcm_livepod_controller_leader", "1 on the agent whose LivePod controller currently leads.", nil, func() []metrics.Sample {
+			if leading, _ := lc.Snapshot(); leading {
+				return []metrics.Sample{{Value: 1}}
+			}
+			return []metrics.Sample{{Value: 0}}
+		})
+		reg.GaugeFunc("lcm_livepod_running", "Per LivePod (reported by the leading controller): 1 if its pod is Running, else 0.", []string{"namespace", "livepod", "node", "phase"}, func() []metrics.Sample {
+			_, st := lc.Snapshot()
+			out := make([]metrics.Sample, 0, len(st))
+			for _, s := range st {
+				v := 0.0
+				if s.Phase == "Running" {
+					v = 1
+				}
+				out = append(out, metrics.Sample{Labels: []string{s.Namespace, s.Name, s.Node, s.Phase}, Value: v})
+			}
+			return out
+		})
 	}
 	go a.FollowRestores(context.Background())
 	// Give the listener a moment, then finish or abort checkpoints a previous process left behind.

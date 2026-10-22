@@ -76,6 +76,14 @@ panel("table", "Node state", [('lcm_fences', "fences"), ('lcm_staged_restores', 
       transformations=[{"id": "merge"}], options={"showHeader": True})
 nextrow()
 
+row("LivePods")
+panel("state-timeline", "LivePod running", [('max by (namespace, livepod) (lcm_livepod_running)', "{{namespace}}/{{livepod}}")], 0, 12,
+      desc="1 while the LivePod's pod is Running (LcmLivePodNotRunning after 10 min at 0).")
+panel("table", "Where each LivePod runs", [('max by (namespace, livepod, node, phase) (lcm_livepod_running)', "")], 12, 12,
+      desc="Reported by the leading controller.", options={"showHeader": True},
+      transformations=[{"id": "labelsToFields"}, {"id": "organize", "options": {"excludeByName": {"Time": True, "Value": True}}}])
+nextrow()
+
 dash = {"title": "Live container migration", "uid": "lcm", "tags": ["lcm", "minecraft"], "timezone": "browser",
         "schemaVersion": 39, "refresh": "30s", "time": {"from": "now-24h", "to": "now"}, "panels": panels,
         "description": "uorux/live-container-migration — runbook: docs/operations.md"}

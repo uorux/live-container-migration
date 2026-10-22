@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -43,6 +44,26 @@ type Controller struct {
 	Dyn      dynamic.Interface
 	Log      *slog.Logger
 	Interval time.Duration
+
+	mu      sync.Mutex
+	leading bool
+	state   map[string]Status // namespace/name -> last reconciled status (leader only)
+}
+
+// Status is what the controller last saw for one LivePod.
+type Status struct {
+	Namespace, Name, Pod, Node, Phase string
+}
+
+// Snapshot returns whether this agent leads and, if so, the LivePods' last statuses (for metrics).
+func (c *Controller) Snapshot() (bool, []Status) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]Status, 0, len(c.state))
+	for _, s := range c.state {
+		out = append(out, s)
+	}
+	return c.leading, out
 }
 
 // Run competes for leadership (Lease kube-system/lcm-livepod-controller) and reconciles while
@@ -62,9 +83,17 @@ func (c *Controller) Run(ctx context.Context, identity string) {
 		Callbacks: leaderelection.LeaderCallbacks{
 			OnStartedLeading: func(ctx context.Context) {
 				c.Log.Info("livepod controller: leading")
+				c.mu.Lock()
+				c.leading = true
+				c.mu.Unlock()
 				c.loop(ctx)
 			},
-			OnStoppedLeading: func() { c.Log.Info("livepod controller: lost leadership") },
+			OnStoppedLeading: func() {
+				c.Log.Info("livepod controller: lost leadership")
+				c.mu.Lock()
+				c.leading, c.state = false, nil
+				c.mu.Unlock()
+			},
 		},
 	})
 }
@@ -94,11 +123,20 @@ func (c *Controller) reconcileAll(ctx context.Context) error {
 		}
 		return err
 	}
+	present := map[string]bool{}
 	for i := range list.Items {
+		present[list.Items[i].GetNamespace()+"/"+list.Items[i].GetName()] = true
 		if err := c.reconcile(ctx, &list.Items[i]); err != nil {
 			c.Log.Warn("livepod", "namespace", list.Items[i].GetNamespace(), "name", list.Items[i].GetName(), "err", err)
 		}
 	}
+	c.mu.Lock()
+	for k := range c.state {
+		if !present[k] {
+			delete(c.state, k) // LivePod deleted
+		}
+	}
+	c.mu.Unlock()
 	return nil
 }
 
@@ -174,6 +212,12 @@ func podFromTemplate(lp *unstructured.Unstructured) (*corev1.Pod, error) {
 }
 
 func (c *Controller) setStatus(ctx context.Context, lp *unstructured.Unstructured, pod, node, phase string, pods int) error {
+	c.mu.Lock()
+	if c.state == nil {
+		c.state = map[string]Status{}
+	}
+	c.state[lp.GetNamespace()+"/"+lp.GetName()] = Status{lp.GetNamespace(), lp.GetName(), pod, node, phase}
+	c.mu.Unlock()
 	cur, _, _ := unstructured.NestedMap(lp.Object, "status")
 	want := map[string]any{"pod": pod, "node": node, "phase": phase, "pods": int64(pods)}
 	same := cur != nil

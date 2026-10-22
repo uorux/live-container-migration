@@ -74,3 +74,17 @@ spec:
       annotations:
         summary: "lcm-agent versions differ across nodes"
         description: "Finish the rollout before migrating: a restore needs the same relay binary on every node."
+    - alert: LcmLivePodNotRunning
+      expr: max by (namespace, livepod) (lcm_livepod_running{phase!="Paused"}) == 0
+      for: 10m
+      labels: {severity: critical}
+      annotations:
+        summary: "LivePod {{ $labels.namespace }}/{{ $labels.livepod }} has had no running pod for 10 minutes"
+        description: "kubectl get livepod -n {{ $labels.namespace }} {{ $labels.livepod }} shows the pod and phase. A pod left on a dead node blocks a new one by design (no two copies); force-delete it once the node is really gone. A fenced source after a failed migration needs `lcm recover`."
+    - alert: LcmLivePodControllerAbsent
+      expr: sum(lcm_livepod_controller_leader) == 0
+      for: 10m
+      labels: {severity: warning}
+      annotations:
+        summary: "No lcm-agent is leading the LivePod controller"
+        description: "LivePods won't be recreated after a failure. Check lcm-agent logs for leader election errors (Lease kube-system/lcm-livepod-controller)."

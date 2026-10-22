@@ -52,6 +52,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 
 	"lcm/internal/api"
+	"lcm/internal/metrics"
 	"lcm/internal/stage"
 )
 
@@ -98,6 +99,9 @@ func (a *Agent) GC(ctx context.Context, maxAge time.Duration) {
 		}
 	}
 }
+
+// Metrics is the registry served at /metrics, for components running inside the agent.
+func (a *Agent) Metrics() *metrics.Registry { return a.tm.reg }
 
 func (a *Agent) Handler() http.Handler {
 	mux := http.NewServeMux()

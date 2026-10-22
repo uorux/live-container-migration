@@ -40,6 +40,8 @@ curl -s http://<gateway-admin>:8080/status | jq   # tunnel up/down, players, las
 | `lcm_staged_restores`, `lcm_fences`, `lcm_agent_inflight_checkpoints` | node state |
 | `lcm_agent_build_info{version}` | all nodes should agree (a restore needs the same relay binary everywhere) |
 | `lcm_logship_lines{state}` | log lines shipped to / dropped for VictoriaLogs |
+| `lcm_livepod_running{namespace,livepod,node,phase}` | per LivePod, from the leading controller: 1 if its pod is Running |
+| `lcm_livepod_controller_leader` | 1 on the agent leading the LivePod controller |
 
 `lcm-gateway` (`/metrics` on the admin port, ServiceMonitor): tunnel state, players, the
 per-outage duration histogram (the client-side view of each migration), bytes, held logins. See
@@ -57,6 +59,8 @@ the metric HELP text for the exact list.
 | `LcmBlackoutSlow` | warning | A migration's blackout exceeded 12 s (clients give up at 30 s). Look at `lcm_checkpoint_phase_seconds` to see which phase grew. |
 | `LcmStagingNotCleaned` | warning | Checkpoint images have sat in RAM for 30 min with nothing in flight: a failed migration left them. If `lcm history` shows no failed migration needing them, delete `/var/lib/lcm/{ckpt,restore}/*` on that node. |
 | `LcmAgentVersionSkew` | warning | Nodes run different lcm versions; finish the rollout before migrating. |
+| `LcmLivePodNotRunning` | critical | A LivePod has had no Running pod for 10 min (paused ones excepted). `kubectl get livepod` shows its pod and phase. A pod stuck on a dead node blocks a replacement by design; force-delete it once the node is really gone. A fenced source after a failed migration needs `lcm recover`. |
+| `LcmLivePodControllerAbsent` | warning | No agent leads the LivePod controller (Lease `kube-system/lcm-livepod-controller`): LivePods won't be recreated. Check lcm-agent logs. |
 
 ## Failure behaviour (what happens when things break mid-migration)
 
@@ -68,6 +72,18 @@ the metric HELP text for the exact list.
 | shipping fails | after the final dump | retried 4x; then the CLI reports where the images are (final dump on the source, pre-dumps on the destination) |
 | the restore fails on the destination | after shipping | the destination pod is fenced, the images are forwarded back, the workload is restored on the source node (~10-15 s freeze) |
 | the CLI dies / its connection drops | any time | nothing stops; re-run `lcm history`/`lcm status` to see the outcome; leftover destination pods carry the `lcm.rooty.dev/migration-id` annotation |
+
+## How a migration hides its latency
+
+- Pre-copy: memory is copied while the workload runs; only the last dirty pages are dumped
+  while it is frozen. Transfers are zstd-compressed.
+- The destination pod is created and its images pulled before anything is dumped.
+- While pre-copy runs, the destination agent opens (and closes) the files the workload holds
+  open on shared volumes, so NFS delegation / CephFS cap recalls don't happen inside CRIU's
+  restore (each first open from a new node used to cost ~100 ms on NFS).
+- Just before the final dump the source marks the staging `FINAL`: the parked destination pod
+  leaves its wait init container and kubelet starts the container, whose `lcm-runc create`
+  waits for `READY`. Kubelet's ~1-2 s of start-up overlaps the dump and transfer.
 
 ## Performance knobs
 
