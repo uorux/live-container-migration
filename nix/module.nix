@@ -192,6 +192,10 @@ in
         ExecStart = "${cfg.package}/bin/lcm-agent serve -listen ${cfg.listenAddress}:${toString cfg.port} -token-file ${cfg.tokenFile}";
         Restart = "always";
         RestartSec = 2;
+        # On restart (including NixOS activation), stop only the agent itself: a runc/CRIU it
+        # spawned may be in the middle of dumping a workload; the restarted agent picks up the
+        # result (Recover).
+        KillMode = "process";
         # Root: it drives runc/CRIU against containerd's containers.
       };
     };

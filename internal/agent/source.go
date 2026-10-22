@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -54,6 +55,9 @@ func (a *Agent) checkpoint(ctx context.Context, req api.CheckpointRequest, emit 
 			os.RemoveAll(dir)
 		}
 	}()
+	if err := writeJSON(filepath.Join(dir, "request.json"), persisted{Request: req, Upper: upper, Pid: st.Pid}); err != nil {
+		return nil, err
+	}
 	dst := &stagingClient{base: req.DestURL, key: req.DestKey, token: a.token}
 	if err := dst.reset(ctx); err != nil {
 		return nil, fmt.Errorf("destination agent: %w", err)
@@ -128,6 +132,7 @@ func (a *Agent) checkpoint(ctx context.Context, req api.CheckpointRequest, emit 
 	if err := os.WriteFile(fence, []byte(req.MigrationID), 0o644); err != nil {
 		return abort(err)
 	}
+	os.WriteFile(filepath.Join(dir, "FENCED"), nil, 0o644)
 	emit(api.Event{Phase: "fence"})
 
 	// The pod IP changes on the destination; lcm-runc needs the old addresses to restore (and then
@@ -141,6 +146,19 @@ func (a *Agent) checkpoint(ctx context.Context, req api.CheckpointRequest, emit 
 	// executable. Ship the exact running binary; lcm-runc puts it in place before restoring.
 	if err := captureRelay(st.Pid, dir); err != nil {
 		return abort(fmt.Errorf("capturing the running relay binary: %w", err))
+	}
+	if len(srcAddrs) > 0 {
+		if err := netaddr.Write(filepath.Join(dir, "source-addrs"), srcAddrs); err != nil {
+			return abort(err)
+		}
+	}
+	if req.LazyRestore {
+		os.WriteFile(filepath.Join(dir, "LAZY"), nil, 0o644)
+	}
+	// A fallback copy of the writable layer in case the authoritative post-dump capture becomes
+	// impossible (e.g. the agent restarts and kubelet removes the dead container meanwhile).
+	if err := captureRootfs(upper, filepath.Join(dir, "rootfs-diff.pre.tar")); err != nil {
+		return abort(fmt.Errorf("rootfs diff: %w", err))
 	}
 
 	res.FreezeStart = time.Now()
@@ -165,52 +183,42 @@ func (a *Agent) checkpoint(ctx context.Context, req api.CheckpointRequest, emit 
 	res.SourceKilled = true
 	res.FinalDumpMS = since(res.FreezeStart)
 	res.FinalBytes = dirSize(filepath.Join(dir, "images"))
+	os.WriteFile(filepath.Join(dir, "DUMPED"), nil, 0o644)
 	emit(api.Event{Phase: "dump", Bytes: res.FinalBytes, Millis: res.FinalDumpMS})
+	return a.finish(bg, req, dir, upper, res, emit)
+}
 
-	// From here on the source is gone: the state exists only in `dir` plus what the destination
-	// already has. Retry transient shipping failures rather than giving up.
+// finish ships everything after a successful final dump: from here on the source is gone and its
+// state exists only in dir plus what the destination already has. It is also how an agent that
+// restarted mid-migration completes it (see Recover). Transient failures are retried.
+func (a *Agent) finish(ctx context.Context, req api.CheckpointRequest, dir, upper string, res *api.CheckpointResult, emit func(api.Event)) (*api.CheckpointResult, error) {
+	dst := &stagingClient{base: req.DestURL, key: req.DestKey, token: a.token}
 	t0 := time.Now()
 	diffPath := filepath.Join(dir, "rootfs-diff.tar")
 	if err := captureRootfs(upper, diffPath); err != nil {
-		return res, fmt.Errorf("rootfs diff: %w", err)
+		// The dead container's layer may already be gone; fall back to the pre-dump copy.
+		if _, perr := os.Stat(filepath.Join(dir, "rootfs-diff.pre.tar")); perr != nil {
+			return res, fmt.Errorf("rootfs diff: %w", err)
+		}
+		os.Rename(filepath.Join(dir, "rootfs-diff.pre.tar"), diffPath)
+		emit(api.Event{Phase: "rootfs", Message: "post-dump capture failed (" + err.Error() + "); using the pre-dump copy"})
 	}
 	res.RootfsBytes = fileSize(diffPath)
 	emit(api.Event{Phase: "rootfs", Bytes: res.RootfsBytes, Millis: since(t0)})
-	if len(srcAddrs) > 0 {
-		if err := netaddr.Write(filepath.Join(dir, "source-addrs"), srcAddrs); err != nil {
-			return res, err
-		}
-	}
 
 	t1 := time.Now()
 	ship := func() error {
-		if err := dst.putDir(bg, filepath.Join(dir, "images"), "images"); err != nil {
+		if err := dst.putDir(ctx, filepath.Join(dir, "images"), "images"); err != nil {
 			return fmt.Errorf("shipping final images: %w", err)
 		}
-		if err := dst.putFile(bg, diffPath, "rootfs-diff.tar"); err != nil {
-			return fmt.Errorf("shipping rootfs diff: %w", err)
-		}
-		if len(srcAddrs) > 0 {
-			if err := dst.putFile(bg, filepath.Join(dir, "source-addrs"), "source-addrs"); err != nil {
-				return fmt.Errorf("shipping source addresses: %w", err)
-			}
-		}
-		if req.LazyRestore {
-			if err := os.WriteFile(filepath.Join(dir, "LAZY"), nil, 0o644); err != nil {
-				return err
-			}
-			if err := dst.putFile(bg, filepath.Join(dir, "LAZY"), "LAZY"); err != nil {
-				return fmt.Errorf("shipping lazy marker: %w", err)
-			}
-		}
-		for _, f := range []string{stage.RelayExeName, stage.RelayPathName} {
+		for _, f := range []string{"rootfs-diff.tar", "source-addrs", "LAZY", stage.RelayExeName, stage.RelayPathName} {
 			if _, err := os.Stat(filepath.Join(dir, f)); err == nil {
-				if err := dst.putFile(bg, filepath.Join(dir, f), f); err != nil {
+				if err := dst.putFile(ctx, filepath.Join(dir, f), f); err != nil {
 					return fmt.Errorf("shipping %s: %w", f, err)
 				}
 			}
 		}
-		return dst.ready(bg)
+		return dst.ready(ctx)
 	}
 	for attempt := 1; ; attempt++ {
 		err := ship()
@@ -223,11 +231,30 @@ func (a *Agent) checkpoint(ctx context.Context, req api.CheckpointRequest, emit 
 		emit(api.Event{Phase: "ship", Message: fmt.Sprintf("attempt %d failed, retrying: %v", attempt, err)})
 		time.Sleep(time.Duration(attempt) * time.Second)
 	}
+	os.WriteFile(filepath.Join(dir, "SHIPPED"), nil, 0o644)
 	res.ShipMS = since(t1)
 	res.ReadyAt = time.Now()
-	res.FrozenMS = res.ReadyAt.Sub(res.FreezeStart).Milliseconds()
+	if !res.FreezeStart.IsZero() {
+		res.FrozenMS = res.ReadyAt.Sub(res.FreezeStart).Milliseconds()
+	}
 	emit(api.Event{Phase: "ready", Millis: res.FrozenMS, Message: "destination staged"})
 	return res, nil
+}
+
+// persisted is what the agent keeps on disk about an in-flight checkpoint, so a restarted agent
+// can tell what state it was in.
+type persisted struct {
+	Request api.CheckpointRequest `json:"request"`
+	Upper   string                `json:"upper"`
+	Pid     int                   `json:"pid"`
+}
+
+func writeJSON(path string, v any) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, b, 0o644)
 }
 
 // captureRelay saves the container init's executable if it is lcm-relay: its bytes (read via

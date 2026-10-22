@@ -55,6 +55,8 @@ func main() {
 	}
 	go a.GC(context.Background(), 14*24*time.Hour)
 	go a.FollowRestores(context.Background())
+	// Give the listener a moment, then finish or abort checkpoints a previous process left behind.
+	go func() { time.Sleep(time.Second); a.Recover(context.Background()) }()
 	srv := &http.Server{Addr: *listen, Handler: a.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	log.Info("lcm-agent listening", "addr", *listen, "state", stage.Root(), "version", agent.Version)
 	if err := srv.ListenAndServe(); err != nil {

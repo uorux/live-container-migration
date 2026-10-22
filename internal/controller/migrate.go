@@ -227,7 +227,9 @@ restored:
 	if b, err := agentDo(ctx, dstURL, o.Token, http.MethodGet, "/v1/stage/"+key+"/result", nil); err == nil {
 		if json.Unmarshal(b, &rr) == nil {
 			res.Restore = &rr
-			res.Blackout = rr.Finished.Sub(ck.FreezeStart)
+			if ck != nil && !ck.FreezeStart.IsZero() {
+				res.Blackout = rr.Finished.Sub(ck.FreezeStart)
+			}
 		}
 	}
 	logf("restored on %s: restore %dms, relay resume %q, blackout %s", res.DestNode, rr.RestoreMS, rr.RelayResume, res.Blackout.Round(time.Millisecond))
@@ -554,14 +556,28 @@ func pollCheckpoint(ctx context.Context, url, token, id string, last *api.Checkp
 		Error  string                `json:"error"`
 		Result *api.CheckpointResult `json:"result"`
 	}
+	var unknownSince time.Time
 	err := wait.PollUntilContextTimeout(context.WithoutCancel(ctx), time.Second, 15*time.Minute, true, func(ctx context.Context) (bool, error) {
 		b, err := agentDo(ctx, url, token, http.MethodGet, "/v1/checkpoint/"+id, nil)
 		if err != nil {
-			return false, nil // agent unreachable for now; keep trying
+			// Unreachable: keep trying. Reachable but "unknown migration" for a while: a restarted
+			// agent found nothing to recover, so there is nothing left to wait for.
+			if strings.Contains(err.Error(), "404") {
+				if unknownSince.IsZero() {
+					unknownSince = time.Now()
+				} else if time.Since(unknownSince) > 30*time.Second {
+					return false, fmt.Errorf("the source agent no longer knows migration %s (it restarted and had nothing to resume)", id)
+				}
+			}
+			return false, nil
 		}
+		unknownSince = time.Time{}
 		return json.Unmarshal(b, &st) == nil && st.Done, nil
 	})
 	if err != nil {
+		if !wait.Interrupted(err) {
+			return last, err
+		}
 		return last, fmt.Errorf("lost track of the checkpoint (source agent unreachable): its state is unknown; check `journalctl -u lcm-agent` on the source node")
 	}
 	if st.Result == nil {
