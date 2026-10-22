@@ -135,6 +135,20 @@ consistent.
   still in the send buffer. Explicit aborts use `SO_LINGER=0`.
 - **Upstream dial failure** on the relay → RESET (code 1) → the player is disconnected.
 
+## Readiness (relay) and Minecraft mode (gateway)
+
+Neither changes the wire protocol.
+
+- On a fresh start the relay dials the gateway only after the server is ready (`-wait-ready`, on
+  by default: TCP connect to `-upstream`; with `-minecraft-ready`: a status ping answered). Players
+  who arrive earlier stay queued in the gateway as never-opened streams and are opened when the
+  session attaches (NEW keeps them, see Reconciliation). A restored relay has already passed the
+  check and reconnects at once.
+- `lcm-gateway -minecraft` inspects the first packets of each player connection before calling
+  `AddStream`, replays them byte-exact, answers status locally while no tunnel is attached, and
+  keeps login streams that have not yet received a server byte alive with no-op packets. See
+  [on-demand.md](on-demand.md) §6.
+
 ## Liveness, GOAWAY, quiesce
 
 - **Heartbeat:** both sides send PING every 2 s (`-ping-interval`). A connection that has
@@ -153,7 +167,7 @@ consistent.
     should wait for EOF before dumping, because EOF means the relay's end of the unix socket is
     gone. Errors are reported as `error <msg>`.
   - `resume` → `ok`, and a reconnect starts at once. Poll `status` to see `"connected": true`.
-  - `status` → one line of JSON (session, state, connected, streams, counters, child_pid).
+  - `status` → one line of JSON (session, state, connected, streams, counters, child_pid, ready).
   - If no `resume` arrives within `-quiesce-timeout` (120 s), the relay resumes by itself.
     Under CRIU's time namespace, the frozen period does not count toward this.
 

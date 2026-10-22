@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"lcm/internal/mcproto"
 	"lcm/internal/proxyproto"
 	"lcm/internal/tunnel"
 	"lcm/internal/wire"
@@ -38,10 +39,36 @@ type Config struct {
 	// CheckSockets verifies via /proc that no non-loopback socket remains
 	// before acknowledging quiesce.
 	CheckSockets bool
+	// Ready selects the check that must pass before the first tunnel
+	// connection of a fresh relay process: none (zero value), a TCP connect
+	// to Upstream, or a Minecraft status ping answered by Upstream. Once
+	// passed it is never repeated, so a CRIU-restored relay does not re-wait.
+	Ready ReadyCheck
+	// ReadyInterval is the probe period (default 1 s).
+	ReadyInterval time.Duration
 	// DialTunnel overrides how the gateway is dialled (tests). The default is a
 	// plain-TCP (MPTCP disabled) dialer.
 	DialTunnel func(ctx context.Context, addr string) (net.Conn, error)
 	Logger     *slog.Logger
+}
+
+// ReadyCheck is a readiness probe kind; see Config.Ready.
+type ReadyCheck int
+
+const (
+	ReadyNone ReadyCheck = iota
+	ReadyTCP
+	ReadyMinecraft
+)
+
+func (c ReadyCheck) String() string {
+	switch c {
+	case ReadyTCP:
+		return "tcp"
+	case ReadyMinecraft:
+		return "minecraft"
+	}
+	return "none"
 }
 
 type stopReason int
@@ -73,6 +100,9 @@ type Relay struct {
 	lastErr       string
 	dials         sync.WaitGroup // in-flight upstream dials
 
+	ready  atomic.Bool
+	probes atomic.Int64 // readiness probes run (tests, status)
+
 	ChildPID atomic.Int64
 }
 
@@ -96,11 +126,15 @@ func New(cfg Config) *Relay {
 	if cfg.BackoffMax <= 0 {
 		cfg.BackoffMax = 2 * time.Second
 	}
+	if cfg.ReadyInterval <= 0 {
+		cfg.ReadyInterval = time.Second
+	}
 	cfg.Tunnel.Logger = cfg.Logger
 	cfg.Tunnel.Defaults()
 	r := &Relay{cfg: cfg, log: cfg.Logger, wake: make(chan struct{}, 1), state: "connecting"}
 	// Never MPTCP: CRIU cannot checkpoint IPPROTO_MPTCP sockets.
 	r.up.SetMultipathTCP(false)
+	r.ready.Store(cfg.Ready == ReadyNone)
 	var id [wire.SessionIDLen]byte
 	crand.Read(id[:])
 	r.sess = tunnel.NewSession(tunnel.RoleRelay, cfg.Tunnel, id, func(st *tunnel.Stream) {
@@ -238,8 +272,16 @@ func (r *Relay) Run(ctx context.Context) {
 	r.sess.CloseAll()
 }
 
-// attempt dials, handshakes and runs one tunnel connection.
+// attempt dials, handshakes and runs one tunnel connection. On a fresh
+// process it first waits for the server to be ready.
 func (r *Relay) attempt(ctx context.Context) (connected bool, err error) {
+	if !r.ready.Load() {
+		r.setState("waiting-for-server")
+		if err := r.waitReady(ctx); err != nil {
+			return false, err
+		}
+		r.setState("connecting")
+	}
 	dctx, dcancel := context.WithTimeout(ctx, r.cfg.Tunnel.HandshakeTimeout)
 	nc, err := r.dialTunnel(dctx)
 	dcancel()
@@ -273,6 +315,71 @@ func (r *Relay) attempt(ctx context.Context) (connected bool, err error) {
 	}
 	return true, <-runDone
 }
+
+// waitReady polls the upstream until the readiness check passes or ctx ends.
+// It runs inside an attempt, so Quiesce cancels it and waits for the probe's
+// loopback socket to be closed before acknowledging.
+func (r *Relay) waitReady(ctx context.Context) error {
+	start := time.Now()
+	lastLog := start
+	r.log.Info("waiting for the server to become ready", "check", r.cfg.Ready.String(), "upstream", r.cfg.Upstream)
+	for {
+		err := r.probe(ctx)
+		r.probes.Add(1)
+		if err == nil {
+			r.ready.Store(true)
+			r.log.Info("server ready", "check", r.cfg.Ready.String(), "waited", time.Since(start).Round(time.Millisecond))
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if time.Since(lastLog) >= 30*time.Second {
+			lastLog = time.Now()
+			r.log.Info("server not ready yet", "waited", time.Since(start).Round(time.Second), "err", err)
+		} else {
+			r.log.Debug("server not ready", "err", err)
+		}
+		t := time.NewTimer(r.cfg.ReadyInterval)
+		select {
+		case <-t.C:
+		case <-ctx.Done():
+			t.Stop()
+			return ctx.Err()
+		}
+	}
+}
+
+// probe runs one readiness check against the upstream.
+func (r *Relay) probe(ctx context.Context) error {
+	pctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	c, err := r.up.DialContext(pctx, "tcp", r.cfg.Upstream)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	if r.cfg.Ready != ReadyMinecraft {
+		return nil
+	}
+	stop := context.AfterFunc(pctx, func() { c.SetDeadline(time.Unix(1, 0)) })
+	defer stop()
+	if r.cfg.ProxyProtocol {
+		// LOCAL: the server uses the socket's own addresses.
+		if _, err := c.Write(proxyproto.Header(netip.AddrPort{}, netip.AddrPort{})); err != nil {
+			return err
+		}
+	}
+	host, port := "127.0.0.1", uint16(25565)
+	if ap, err := netip.ParseAddrPort(r.cfg.Upstream); err == nil {
+		host, port = ap.Addr().String(), ap.Port()
+	}
+	_, err = mcproto.QueryStatus(c, -1, host, port)
+	return err
+}
+
+// Ready reports whether the readiness check has passed.
+func (r *Relay) Ready() bool { return r.ready.Load() }
 
 // Quiesce closes the tunnel, stops reconnecting and waits until no
 // non-loopback socket of this process remains (if CheckSockets).
@@ -396,6 +503,7 @@ type Status struct {
 	QuiescedForMS  int64     `json:"quiesced_for_ms,omitempty"`
 	LastError      string    `json:"last_error,omitempty"`
 	ChildPID       int64     `json:"child_pid,omitempty"`
+	Ready          bool      `json:"ready"`
 }
 
 // Status returns a snapshot.
@@ -405,7 +513,7 @@ func (r *Relay) Status() Status {
 	defer r.mu.Unlock()
 	st := Status{Session: r.SessionID(), State: r.state, Connected: s.Connected, Streams: s.Streams,
 		Connects: s.Connects, Disconnects: s.Disconnects, LastConnect: s.LastConnect,
-		LastDisconnect: s.LastDisconnect, LastError: r.lastErr, ChildPID: r.ChildPID.Load()}
+		LastDisconnect: s.LastDisconnect, LastError: r.lastErr, ChildPID: r.ChildPID.Load(), Ready: r.ready.Load()}
 	if r.quiesced {
 		st.QuiescedForMS = time.Since(r.quiescedAt).Milliseconds()
 	}

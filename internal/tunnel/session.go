@@ -320,8 +320,17 @@ const lingerTimeout = 10 * time.Second
 // send RST and discard data still in its send buffer (e.g. the server's final
 // kick message to a player who is still sending). So: half-close (queued data,
 // then FIN, still go out), drain input until the peer closes, then close.
+// TCPLike is what closeLocal needs for graceful and abortive closes;
+// *net.TCPConn implements it, and so may wrappers (e.g. the gateway's
+// Minecraft hold wrapper) that want the same treatment.
+type TCPLike interface {
+	net.Conn
+	CloseWrite() error
+	SetLinger(sec int) error
+}
+
 func closeLocal(c net.Conn, abort bool) {
-	tc, ok := c.(*net.TCPConn)
+	tc, ok := c.(TCPLike)
 	if abort || !ok {
 		if ok {
 			tc.SetLinger(0)

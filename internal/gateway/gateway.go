@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"lcm/internal/tunnel"
@@ -25,13 +26,18 @@ type Config struct {
 	// Backend is the name relays must present in HELLO. One backend per
 	// gateway for now; the structure allows several (one player listener each).
 	Backend string
-	Logger  *slog.Logger
+	// Minecraft, if set, makes the player listener Minecraft-aware for the
+	// first packets of each connection (local status while the backend is
+	// down, login hold). Nil keeps the gateway pure L4.
+	Minecraft *MinecraftConfig
+	Logger    *slog.Logger
 }
 
 // Backend is one Minecraft server reachable through a relay session.
 type Backend struct {
 	Name    string
 	Session *tunnel.Session
+	held    atomic.Int64 // login streams currently held (Minecraft mode)
 }
 
 // Gateway serves player and tunnel listeners.
@@ -53,6 +59,11 @@ func New(cfg Config) *Gateway {
 	}
 	cfg.Tunnel.Logger = cfg.Logger
 	cfg.Tunnel.Defaults()
+	if cfg.Minecraft != nil {
+		mc := *cfg.Minecraft
+		mc.defaults()
+		cfg.Minecraft = &mc
+	}
 	g := &Gateway{cfg: cfg, log: cfg.Logger, backends: map[string]*Backend{}, started: time.Now()}
 	g.backends[cfg.Backend] = &Backend{
 		Name:    cfg.Backend,
@@ -99,6 +110,10 @@ func (g *Gateway) ServePlayers(ln net.Listener, b *Backend) error {
 			}
 			g.log.Error("player accept", "err", err)
 			time.Sleep(50 * time.Millisecond)
+			continue
+		}
+		if g.cfg.Minecraft != nil {
+			go g.handleMinecraft(c, b)
 			continue
 		}
 		open := wire.Open{Src: addrPort(c.RemoteAddr()), Dst: addrPort(c.LocalAddr())}
@@ -159,6 +174,7 @@ type BackendStatus struct {
 	LastConnect    time.Time           `json:"last_connect,omitzero"`
 	LastDisconnect time.Time           `json:"last_disconnect,omitzero"`
 	MaxTxBuffered  int                 `json:"max_tx_buffered"`
+	Held           int64               `json:"held,omitempty"`
 	StreamInfo     []tunnel.StreamInfo `json:"stream_info,omitempty"`
 }
 
@@ -176,7 +192,7 @@ func (g *Gateway) Status(detail bool) Status {
 		id := b.Session.ID()
 		bst := BackendStatus{Name: b.Name, Session: hex.EncodeToString(id[:]), Connected: s.Connected,
 			Streams: s.Streams, Connects: s.Connects, Disconnects: s.Disconnects,
-			LastConnect: s.LastConnect, LastDisconnect: s.LastDisconnect, MaxTxBuffered: s.MaxTxBuffered}
+			LastConnect: s.LastConnect, LastDisconnect: s.LastDisconnect, MaxTxBuffered: s.MaxTxBuffered, Held: b.held.Load()}
 		if detail {
 			bst.StreamInfo = b.Session.StreamInfos()
 		}

@@ -301,11 +301,67 @@ so `lcm-runc` restores on create.
 
 ## 6. Phased implementation plan
 
+### Implementation status (2026-10-22)
+
+The gateway hold (phase 1) and the relay readiness gate (phase 2) are implemented; the lifecycle
+(phase 3+) is not. Code: [internal/mcproto](../internal/mcproto) (VarInt, framing, handshake,
+status, Login Disconnect, legacy ping), [internal/gateway/minecraft.go](../internal/gateway/minecraft.go),
+`waitReady` in [internal/relay/relay.go](../internal/relay/relay.go).
+
+`lcm-gateway -minecraft` (env `LCM_MINECRAFT=true`; off by default, and off means exactly the old
+pure-L4 path):
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `-minecraft` | off | sniff the first packets of each player connection |
+| `-motd` | `Server is starting, please wait...` | status description while no relay is connected (env `LCM_MOTD`) |
+| `-status-version` | `starting` | `version.name` of that reply; `version.protocol` echoes the client's handshake |
+| `-hold-interval` | 10s | Set Compression −1 (`06 03 ff ff ff ff 0f`) period for held logins |
+| `-hold-max` | 5m | then Login Disconnect with `-hold-message`; 1.7.x (protocol < 47) gets no keepalive and at most 25 s |
+
+Behaviour, and where it differs from §5.1:
+
+- Handshake (and Login Start for intents 2/3) are read with a 5 s deadline and replayed byte-exact
+  through a wrapper around the player socket; nothing in `internal/tunnel` changed except that
+  `closeLocal` accepts any `TCPLike` (`CloseWrite` + `SetLinger`), so the wrapper keeps the
+  graceful/abortive close behaviour.
+- **Status:** answered locally (status + pong) only while the backend session is not connected,
+  otherwise streamed to the real server. No cached status JSON yet, so during a migration blackout
+  the server list briefly shows the configured MOTD.
+- **Login:** every login/transfer stream goes through `holdConn`. The first server write flips it to
+  "started" under the write mutex; injections happen only under that mutex while not started, so
+  they never interleave with server bytes and never follow one (or the server's FIN). Established
+  streams in play state are therefore never touched by an outage. A login that arrives during a
+  migration blackout is held like one that arrives during boot.
+- **Hold limit:** Login Disconnect, graceful close (no RST that could drop it), and the stream is
+  reset (removed if the relay never saw it). A failed keepalive write drops the stream too.
+- **Legacy ping** (0xFE, vanilla's detection rule): answered with a `§1` kick-style reply while down,
+  streamed while up. **Anything that is not a valid handshake is closed** (not passed through as
+  §5.1 suggested).
+- `-hold-keepalive query|none` is not implemented (setcompression only), and there are no metrics
+  beyond `held` (currently held logins) in the gateway's `/status`.
+
+`lcm-relay` readiness (phase 2): before the first tunnel connection of a fresh process it polls
+`-upstream` every `-ready-interval` (1 s): a TCP connect by default (`-wait-ready`, on), or with
+`-minecraft-ready` (env `LCM_MINECRAFT_READY=true`) a full status ping (PROXY v2 `LOCAL` header first
+when `-proxy-protocol` is on). The check runs inside the connect attempt, so `quiesce` cancels it
+cleanly. The passed state lives in memory, so a CRIU-restored relay never re-waits. `status` on the
+control socket reports `"ready"` and the state `waiting-for-server`.
+
+Tests: `internal/mcproto` (VarInt vectors, framing, handshake capture, legacy reply),
+`internal/gateway/minecraft_test.go` (in-process gateway + relay + fake server from
+`internal/mcproto/mctest`: keepalives at the configured interval while the server is not ready, then
+byte-exact replay and server bytes with no injection afterwards; local status then passthrough;
+quiesce mid-stream gets no injection while a new login during the outage is held; hold limit
+Disconnect; 1.7.x; garbage and legacy ping; `-minecraft` off stays L4),
+`internal/relay/ready_test.go` (gate, no re-probe after passing, quiesce while waiting). Not yet
+done: the e2e run with a real client (HeadlessMC) against the gateway binary.
+
 | Phase | Work | Reuses | Done when |
 |---|---|---|---|
 | 0 (done) | Prove the login hold with real clients | – | §2 |
-| 1 | Gateway `-protocol minecraft`: sniff and replay wrapper, local status while down, `holdConn` keepalive, hold limit with Login Disconnect, 1.7.x path, metrics (`held`, `players`). Unit tests with a fake client: packet bytes, no injection after the first backend byte, the replay is exact. | `ServePlayers`, `AddStream`, the session queues unopened streams | A cold `lcm-relay` that starts 3 min late still gets the queued player in; e2e covers this with an nmp bot in `query` mode, plus a manual HeadlessMC run in `setcompression` mode |
-| 2 | Relay readiness gate (loopback status probe, with PROXY v2 LOCAL when configured), `ready` in `status` | relay dial loop | No RESET for players who arrive during boot |
+| 1 (done, see above) | Gateway `-minecraft`: sniff and replay wrapper, local status while down, `holdConn` keepalive, hold limit with Login Disconnect, 1.7.x path, metrics (`held`, `players`). Unit tests with a fake client: packet bytes, no injection after the first backend byte, the replay is exact. | `ServePlayers`, `AddStream`, the session queues unopened streams | A cold `lcm-relay` that starts 3 min late still gets the queued player in; e2e covers this with an nmp bot in `query` mode, plus a manual HeadlessMC run in `setcompression` mode |
+| 2 (done, see above) | Relay readiness gate (loopback status probe, with PROXY v2 LOCAL when configured), `ready` in `status` | relay dial loop | No RESET for players who arrive during boot |
 | 3a | In-gateway lifecycle for its single backend: pod template file, wake on login, idle stop, Lease, wait for termination before wake. RBAC: pods create/list/watch/delete, leases. Lab first in namespace `ondemand`. | client-go (already in go.mod) | Join a stopped Paper server, then a modded server (1–5 min); stops after idle; `lcm migrate` during play is not interrupted by the idle stopper, and the stopper waits for the Lease |
 | 3b | Move lifecycle into `lcm-controller` with a small `MinecraftServer` CRD (template, hostnames, idle settings); the gateway calls `wake` and reports player counts | phase 3a code | Several backends |
 | 4 | Host-based routing to several backends from one gateway (handshake host → backend; the session map already exists) | `backends` map | One LB IP for all servers |

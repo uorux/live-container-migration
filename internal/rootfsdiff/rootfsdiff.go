@@ -133,10 +133,10 @@ func Apply(r io.Reader, root string) error {
 
 		switch {
 		case base == opaqueMarker:
-			parent, err := securePath(root, dir)
-			if err != nil {
-				return err
-			}
+			// target's parent components are resolved inside root; securePath(root, dir) would
+			// leave dir's last component unresolved and ReadDir/RemoveAll would follow a symlink
+			// there out of root.
+			parent := filepath.Dir(target)
 			entries, _ := os.ReadDir(parent)
 			for _, e := range entries {
 				// Entries from this tar are written after their parent dir header and the

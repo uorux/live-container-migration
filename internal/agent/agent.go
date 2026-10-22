@@ -354,11 +354,17 @@ func (a *Agent) handleFence(w http.ResponseWriter, r *http.Request) {
 }
 
 // untar unpacks a tar stream of regular files and directories (what CRIU image dirs contain, plus
-// the relative `parent` symlink) into dir, refusing anything that would escape it.
+// the relative `parent` symlink) into dir, refusing anything that would escape it. All writes go
+// through an os.Root, so a symlink created by an earlier entry is never followed out of dir.
 func untar(r io.Reader, dir string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
 	tr := tar.NewReader(r)
 	for {
 		hdr, err := tr.Next()
@@ -375,17 +381,18 @@ func untar(r io.Reader, dir string) error {
 		if filepath.IsAbs(name) || name == ".." || strings.HasPrefix(name, "../") {
 			return fmt.Errorf("tar entry %q escapes target", hdr.Name)
 		}
-		target := filepath.Join(dir, name)
 		switch hdr.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(target, 0o700); err != nil {
+			if err := root.MkdirAll(name, 0o700); err != nil {
 				return err
 			}
 		case tar.TypeReg:
-			if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
-				return err
+			if d := filepath.Dir(name); d != "." {
+				if err := root.MkdirAll(d, 0o700); err != nil {
+					return err
+				}
 			}
-			f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(hdr.Mode).Perm())
+			f, err := root.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(hdr.Mode).Perm())
 			if err != nil {
 				return err
 			}
@@ -401,7 +408,7 @@ func untar(r io.Reader, dir string) error {
 			if filepath.IsAbs(hdr.Linkname) || strings.Count(filepath.Clean(hdr.Linkname), "..") > 1 {
 				return fmt.Errorf("refusing symlink %q -> %q", hdr.Name, hdr.Linkname)
 			}
-			if err := os.Symlink(hdr.Linkname, target); err != nil {
+			if err := root.Symlink(hdr.Linkname, name); err != nil {
 				return err
 			}
 		default:

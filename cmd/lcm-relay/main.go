@@ -19,6 +19,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -68,6 +69,9 @@ func run(args []string) int {
 	ping := fs.Duration("ping-interval", 2*time.Second, "tunnel heartbeat interval")
 	dead := fs.Duration("dead-timeout", 10*time.Second, "declare the tunnel dead after this long without frames")
 	checkSockets := fs.Bool("check-sockets", true, "verify via /proc that no non-loopback socket remains before acking quiesce")
+	waitReady := fs.Bool("wait-ready", true, "on a fresh start, open the tunnel only once the server accepts TCP connections on -upstream (never repeated after a CRIU restore)")
+	mcReady := fs.Bool("minecraft-ready", envBool("LCM_MINECRAFT_READY"), "make -wait-ready require a Minecraft status ping answer, not just a TCP accept (env LCM_MINECRAFT_READY=true)")
+	readyInterval := fs.Duration("ready-interval", time.Second, "readiness probe interval")
 	logLevel := fs.String("log-level", cliutil.EnvDefault("LCM_LOG_LEVEL", "info"), "debug|info|warn|error")
 	fs.Parse(args)
 	cmd := fs.Args()
@@ -83,8 +87,16 @@ func run(args []string) int {
 		return 2
 	}
 
+	ready := relay.ReadyNone
+	if *waitReady {
+		ready = relay.ReadyTCP
+		if *mcReady {
+			ready = relay.ReadyMinecraft
+		}
+	}
 	r := relay.New(relay.Config{
 		Gateway: *gw, Backend: *backend, Upstream: *upstream, ProxyProtocol: *proxyProto,
+		Ready: ready, ReadyInterval: *readyInterval,
 		QuiesceTimeout: *quiesceTimeout, CheckSockets: *checkSockets, Logger: log,
 		Tunnel: tunnel.Config{Token: tok, Window: int(window), PingInterval: *ping, DeadTimeout: *dead},
 	})
@@ -117,7 +129,7 @@ func run(args []string) int {
 	ctx, cancel := context.WithCancel(context.Background())
 	runDone := make(chan struct{})
 	go func() { r.Run(ctx); close(runDone) }()
-	log.Info("relay started", "session", r.SessionID(), "gateway", *gw, "upstream", *upstream)
+	log.Info("relay started", "session", r.SessionID(), "gateway", *gw, "upstream", *upstream, "ready_check", ready.String())
 
 	var childDone <-chan struct{}
 	if child != nil {
@@ -189,4 +201,9 @@ func ctl(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+func envBool(name string) bool {
+	b, _ := strconv.ParseBool(cliutil.EnvDefault(name, "false"))
+	return b
 }
