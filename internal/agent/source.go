@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"lcm/internal/api"
+	"lcm/internal/netaddr"
 	"lcm/internal/relayctl"
 	"lcm/internal/rootfsdiff"
 	"lcm/internal/runc"
@@ -113,6 +114,13 @@ func (a *Agent) checkpoint(ctx context.Context, req api.CheckpointRequest, emit 
 	}
 	emit(api.Event{Phase: "fence"})
 
+	// The pod IP changes on the destination; lcm-runc needs the old addresses to restore (and then
+	// reset) any non-loopback TCP sockets the workload holds.
+	srcAddrs, err := netaddr.ContainerAddrs(st.Pid)
+	if err != nil {
+		return abort(err)
+	}
+
 	res.FreezeStart = time.Now()
 	err = runc.Checkpoint(ctx, req.ContainerID, runc.CheckpointOpts{
 		ImagePath: filepath.Join(dir, "images"), WorkPath: filepath.Join(dir, "work"), ParentPath: rel(parent),
@@ -141,6 +149,15 @@ func (a *Agent) checkpoint(ctx context.Context, req api.CheckpointRequest, emit 
 	}
 	if err := dst.putFile(ctx, diffPath, "rootfs-diff.tar"); err != nil {
 		return res, fmt.Errorf("shipping rootfs diff: %w", err)
+	}
+	if len(srcAddrs) > 0 {
+		p := filepath.Join(dir, "source-addrs")
+		if err := netaddr.Write(p, srcAddrs); err != nil {
+			return res, err
+		}
+		if err := dst.putFile(ctx, p, "source-addrs"); err != nil {
+			return res, fmt.Errorf("shipping source addresses: %w", err)
+		}
 	}
 	if err := dst.ready(ctx); err != nil {
 		return res, err

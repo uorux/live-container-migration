@@ -90,16 +90,23 @@ in
     # containerd only reads drop-ins at startup. Restarting k3s leaves running pods alone (their
     # shims keep running).
     systemd.services.k3s.restartTriggers = [ runtimeDropin ];
-
     # A copy, not a symlink: containerd refuses to start on a dangling drop-in, and a copy stays
-    # valid TOML even if this module is later removed.
+    # valid TOML even if this module is later removed. (tmpfiles C+ won't overwrite an existing
+    # file, so install it on every activation instead.)
+    system.activationScripts.lcm-containerd-runtime = ''
+      install -D -m 0644 ${runtimeDropin} ${cfg.containerdConfigDir}/60-lcm-runtime.toml
+    '';
+
     systemd.tmpfiles.settings.lcm = {
-      "${cfg.containerdConfigDir}/60-lcm-runtime.toml"."C+".argument = toString runtimeDropin;
       "/var/lib/lcm".d.mode = "0755";
       "/var/lib/lcm/fence".d.mode = "0755";
       # Stable path for containerd: every shim remembers the BinaryName its container was created
       # with, so a store path would break stop/kill of existing containers once it is GC'd.
       "/var/lib/lcm/bin/lcm-runc"."L+".argument = "${cfg.package}/bin/lcm-runc";
+      # Tools lcm-runc and the agent use to handle the pod IP change (see internal/netaddr).
+      "/var/lib/lcm/bin/ip"."L+".argument = "${pkgs.iproute2}/bin/ip";
+      "/var/lib/lcm/bin/ss"."L+".argument = "${pkgs.iproute2}/bin/ss";
+      "/var/lib/lcm/bin/nsenter"."L+".argument = "${pkgs.util-linux}/bin/nsenter";
     };
     systemd.mounts = [ (stagingMount "/var/lib/lcm/ckpt") (stagingMount "/var/lib/lcm/restore") ];
 

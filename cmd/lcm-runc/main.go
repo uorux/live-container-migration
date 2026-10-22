@@ -13,6 +13,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,6 +22,7 @@ import (
 	"time"
 
 	"lcm/internal/api"
+	"lcm/internal/netaddr"
 	"lcm/internal/relayctl"
 	"lcm/internal/rootfsdiff"
 	"lcm/internal/stage"
@@ -207,11 +209,30 @@ func restore(inv invocation, c createArgs, spec *ociSpec, key stage.Key) int {
 	}
 	args = append(args, c.id)
 
+	// Old pod addresses as aliases on lo, so CRIU can rebuild sockets bound to them.
+	netns := spec.netns()
+	var aliases []netip.Addr
+	if addrs, err := netaddr.Read(filepath.Join(stage.RestoreDir(key), "source-addrs")); err == nil && netns != "" {
+		if aliases, err = netaddr.AddAliases(netns, addrs); err != nil {
+			return fail(fmt.Errorf("adding source address aliases: %w", err))
+		}
+		logf("restore %s: source addrs %v, aliased %v on lo in %s", c.id, addrs, aliases, netns)
+	} else {
+		logf("restore %s: no source addrs (err=%v netns=%q)", c.id, err, netns)
+	}
+
 	t1 := time.Now()
 	cmd := exec.Command(realRunc(), args...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	err := cmd.Run()
 	res.RestoreMS = time.Since(t1).Milliseconds()
+	if len(aliases) > 0 {
+		// Connections to the outside were bound to the old pod IP: their peers can't reach us
+		// any more. Reset them now so the application reconnects instead of hanging.
+		if kerr := netaddr.KillAndRemove(netns, aliases); kerr != nil {
+			logf("restore %s: cleaning up old addresses: %v", c.id, kerr)
+		}
+	}
 	if err != nil {
 		return fail(fmt.Errorf("runc restore: %w (CRIU log: %s/restore.log)", err, stage.WorkDir(key)))
 	}
@@ -249,6 +270,22 @@ type ociSpec struct {
 		Path string `json:"path"`
 	} `json:"root"`
 	Annotations map[string]string `json:"annotations"`
+	Linux       struct {
+		Namespaces []struct {
+			Type string `json:"type"`
+			Path string `json:"path"`
+		} `json:"namespaces"`
+	} `json:"linux"`
+}
+
+// netns is the path of the (pod sandbox's) network namespace the container joins.
+func (s *ociSpec) netns() string {
+	for _, ns := range s.Linux.Namespaces {
+		if ns.Type == "network" {
+			return ns.Path
+		}
+	}
+	return ""
 }
 
 func readSpec(bundle string) (*ociSpec, error) {

@@ -40,9 +40,9 @@ import (
 )
 
 type Agent struct {
-	token     string
-	binDir    string // where lcm-relay etc. live, served at /v1/bin/{name}
-	log       *slog.Logger
+	token  string
+	binDir string // where lcm-relay etc. live, served at /v1/bin/{name}
+	log    *slog.Logger
 
 	mu         sync.Mutex
 	migrations map[string]bool // in-flight checkpoints, by container id
