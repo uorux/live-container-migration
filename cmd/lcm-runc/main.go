@@ -138,17 +138,27 @@ func create(inv invocation) {
 		execRunc(os.Args[1:]) // sandbox (pause) containers are never touched
 	}
 	ns, pod, ctr := ann["io.kubernetes.cri.sandbox-namespace"], ann["io.kubernetes.cri.sandbox-name"], ann["io.kubernetes.cri.container-name"]
-	if stage.IsFenced(ns, pod) {
-		msg := fmt.Sprintf("lcm: pod %s/%s was live-migrated away from this node; refusing to start container %s", ns, pod, ctr)
+	uid := ann["io.kubernetes.cri.sandbox-uid"]
+	key := stage.Key{Namespace: stage.Sanitize(ns), Pod: stage.Sanitize(pod), Container: stage.Sanitize(ctr)}
+	// Serialise with the agent's fencing: once a fence call has returned, no restore is running
+	// and none can start. (The lock fd is close-on-exec, so passing through releases it.)
+	unlock, err := stage.Lock(key.String())
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "lcm:", err)
+		os.Exit(1)
+	}
+	if stage.IsFenced(uid) {
+		msg := fmt.Sprintf("lcm: pod %s/%s (%s) was live-migrated away from this node or abandoned; refusing to start container %s", ns, pod, uid, ctr)
 		logf("%s", msg)
 		fmt.Fprintln(os.Stderr, msg)
 		os.Exit(1)
 	}
-	key := stage.Key{Namespace: stage.Sanitize(ns), Pod: stage.Sanitize(pod), Container: stage.Sanitize(ctr)}
 	if !stage.IsReady(key) {
 		execRunc(os.Args[1:])
 	}
-	os.Exit(restore(inv, c, spec, key))
+	code := restore(inv, c, spec, key)
+	unlock()
+	os.Exit(code)
 }
 
 func restore(inv invocation, c createArgs, spec *ociSpec, key stage.Key) int {
@@ -257,6 +267,9 @@ func restore(inv invocation, c createArgs, spec *ociSpec, key stage.Key) int {
 	// Consume the staged restore so a later container restart starts fresh instead of re-restoring
 	// a stale image; keep the images around for debugging until the agent cleans up.
 	os.Rename(stage.ReadyFile(key), stage.ReadyFile(key)+".consumed")
+	if err := os.MkdirAll(filepath.Dir(stage.ConsumedFile(key.String())), 0o755); err == nil {
+		os.WriteFile(stage.ConsumedFile(key.String()), []byte(c.id), 0o644)
+	}
 	logf("restore %s (%s): ok rootfs=%dms restore=%dms", c.id, key, res.RootfsMS, res.RestoreMS)
 	return 0
 }

@@ -46,6 +46,15 @@ in
       description = "Address lcm-agent binds. Agents reach each other on the nodes' InternalIPs.";
     };
     port = mkOption { type = types.port; default = 7790; };
+    allowedCIDRs = mkOption {
+      type = types.listOf types.str;
+      default = [ "10.42.0.0/16" ];
+      description = ''
+        Source networks allowed to reach the agent port regardless of interface. Must include the
+        pod CIDR: the destination pod's wait init container and the relay-injecting init
+        containers call the agent on the node's IP from the pod network.
+      '';
+    };
     firewallInterfaces = mkOption {
       type = types.listOf types.str;
       default = [ ];
@@ -128,5 +137,10 @@ in
 
     environment.systemPackages = [ cfg.package cfg.criuPackage ];
     networking.firewall.interfaces = lib.genAttrs cfg.firewallInterfaces (_: { allowedTCPPorts = [ cfg.port ]; });
+    networking.firewall.extraInputRules = lib.mkIf (config.networking.nftables.enable && cfg.allowedCIDRs != [ ])
+      "ip saddr { ${lib.concatStringsSep ", " cfg.allowedCIDRs} } tcp dport ${toString cfg.port} accept";
+    networking.firewall.extraCommands = lib.mkIf (!config.networking.nftables.enable) (lib.concatMapStrings
+      (c: "iptables -w -A nixos-fw -p tcp -s ${c} --dport ${toString cfg.port} -j nixos-fw-accept\n")
+      cfg.allowedCIDRs);
   };
 }

@@ -18,8 +18,14 @@ import (
 // checkpoint runs a whole source-side migration: iterative pre-dumps shipped to the destination
 // while the workload runs, then relay quiesce, fence, final dump (which stops the workload), and
 // shipping of the last delta and the writable layer. emit receives progress events.
+//
+// ctx (the client's request) can abort the migration only up to the fence: after that the
+// workload is being stopped and its state must reach the destination regardless. runc/CRIU
+// subprocesses are never killed mid-flight (a killed dump can leave the tree frozen); ctx is
+// checked between steps instead.
 func (a *Agent) checkpoint(ctx context.Context, req api.CheckpointRequest, emit func(api.Event)) (*api.CheckpointResult, error) {
-	st, err := runc.GetState(ctx, req.ContainerID)
+	bg := context.WithoutCancel(ctx)
+	st, err := runc.GetState(bg, req.ContainerID)
 	if err != nil {
 		return nil, err
 	}
@@ -30,7 +36,7 @@ func (a *Agent) checkpoint(ctx context.Context, req api.CheckpointRequest, emit 
 	if err != nil {
 		return nil, err
 	}
-	dir := filepath.Join(stage.Root(), "ckpt", stage.Sanitize(req.MigrationID))
+	dir := filepath.Join(stage.Root(), "ckpt", req.MigrationID)
 	if err := os.RemoveAll(dir); err != nil {
 		return nil, err
 	}
@@ -55,9 +61,12 @@ func (a *Agent) checkpoint(ctx context.Context, req api.CheckpointRequest, emit 
 	parent := ""
 	var prevBytes int64 = -1
 	for round := 1; round <= req.PreDump.Max; round++ {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("cancelled before pre-dump %d: %w", round, err)
+		}
 		name := fmt.Sprintf("pre-%d", round)
 		t0 := time.Now()
-		err := runc.Checkpoint(ctx, req.ContainerID, runc.CheckpointOpts{
+		err := runc.Checkpoint(bg, req.ContainerID, runc.CheckpointOpts{
 			ImagePath: filepath.Join(dir, name), WorkPath: filepath.Join(dir, "work-"+name),
 			ParentPath: rel(parent), PreDump: true,
 		})
@@ -95,21 +104,26 @@ func (a *Agent) checkpoint(ctx context.Context, req api.CheckpointRequest, emit 
 			return nil, fmt.Errorf("relay quiesce: %w", err)
 		}
 	}
+	fence := stage.FenceFile(req.PodUID)
 	abort := func(err error) (*api.CheckpointResult, error) {
-		os.Remove(stage.FenceFile(req.Namespace, req.Pod))
+		os.Remove(fence)
 		if relayed {
-			if rerr := relayctl.Command(st.Pid, "resume", 5*time.Second); rerr != nil {
+			if rerr := relayctl.Command(st.Pid, "resume", 5*time.Second); rerr != nil && !os.IsNotExist(rerr) {
 				err = fmt.Errorf("%w (and relay resume failed: %v)", err, rerr)
 			}
 		}
 		return nil, err
 	}
+	if err := ctx.Err(); err != nil {
+		return abort(fmt.Errorf("cancelled before the final dump: %w", err))
+	}
 
 	// Fence first: once the final dump kills the container, kubelet will try to restart it.
-	if err := os.MkdirAll(filepath.Dir(stage.FenceFile(req.Namespace, req.Pod)), 0o755); err != nil {
+	// The fence is keyed by pod UID and stays forever (the agent garbage-collects old fences).
+	if err := os.MkdirAll(filepath.Dir(fence), 0o755); err != nil {
 		return abort(err)
 	}
-	if err := os.WriteFile(stage.FenceFile(req.Namespace, req.Pod), []byte(req.MigrationID), 0o644); err != nil {
+	if err := os.WriteFile(fence, []byte(req.MigrationID), 0o644); err != nil {
 		return abort(err)
 	}
 	emit(api.Event{Phase: "fence"})
@@ -122,19 +136,31 @@ func (a *Agent) checkpoint(ctx context.Context, req api.CheckpointRequest, emit 
 	}
 
 	res.FreezeStart = time.Now()
-	err = runc.Checkpoint(ctx, req.ContainerID, runc.CheckpointOpts{
+	err = runc.Checkpoint(bg, req.ContainerID, runc.CheckpointOpts{
 		ImagePath: filepath.Join(dir, "images"), WorkPath: filepath.Join(dir, "work"), ParentPath: rel(parent),
 	})
 	if err != nil {
-		// CRIU unfreezes the tree when a dump fails: the source keeps running untouched.
-		return abort(fmt.Errorf("final dump: %w (log: %s/logs/%s/work-dump.log)", err, stage.Root(), req.MigrationID))
+		cerr := fmt.Errorf("final dump: %w (log: %s/logs/%s/work-dump.log)", err, stage.Root(), req.MigrationID)
+		if alive(bg, req.ContainerID) {
+			// CRIU unfreezes the tree when a dump fails: the source keeps running untouched.
+			return abort(cerr)
+		}
+		if !imagesComplete(filepath.Join(dir, "images")) {
+			// The tree is gone and there is no usable image: the state is lost. Lift the fence so
+			// kubelet cold-starts the workload where it was (players are disconnected).
+			os.Remove(fence)
+			return nil, fmt.Errorf("%w; the container died without a complete image, so it will cold-start on %s", cerr, "the source node")
+		}
+		// runc reported an error after CRIU dumped and stopped the tree: carry on with the image.
+		emit(api.Event{Phase: "dump", Message: "runc reported an error after a complete dump; continuing: " + err.Error()})
 	}
 	res.SourceKilled = true
 	res.FinalDumpMS = since(res.FreezeStart)
 	res.FinalBytes = dirSize(filepath.Join(dir, "images"))
 	emit(api.Event{Phase: "dump", Bytes: res.FinalBytes, Millis: res.FinalDumpMS})
 
-	// From here on the source is gone; failures must be recovered by restoring from `dir`.
+	// From here on the source is gone: the state exists only in `dir` plus what the destination
+	// already has. Retry transient shipping failures rather than giving up.
 	t0 := time.Now()
 	diffPath := filepath.Join(dir, "rootfs-diff.tar")
 	if err := captureRootfs(upper, diffPath); err != nil {
@@ -142,31 +168,59 @@ func (a *Agent) checkpoint(ctx context.Context, req api.CheckpointRequest, emit 
 	}
 	res.RootfsBytes = fileSize(diffPath)
 	emit(api.Event{Phase: "rootfs", Bytes: res.RootfsBytes, Millis: since(t0)})
-
-	t1 := time.Now()
-	if err := dst.putDir(ctx, filepath.Join(dir, "images"), "images"); err != nil {
-		return res, fmt.Errorf("shipping final images: %w", err)
-	}
-	if err := dst.putFile(ctx, diffPath, "rootfs-diff.tar"); err != nil {
-		return res, fmt.Errorf("shipping rootfs diff: %w", err)
-	}
 	if len(srcAddrs) > 0 {
-		p := filepath.Join(dir, "source-addrs")
-		if err := netaddr.Write(p, srcAddrs); err != nil {
+		if err := netaddr.Write(filepath.Join(dir, "source-addrs"), srcAddrs); err != nil {
 			return res, err
 		}
-		if err := dst.putFile(ctx, p, "source-addrs"); err != nil {
-			return res, fmt.Errorf("shipping source addresses: %w", err)
-		}
 	}
-	if err := dst.ready(ctx); err != nil {
-		return res, err
+
+	t1 := time.Now()
+	ship := func() error {
+		if err := dst.putDir(bg, filepath.Join(dir, "images"), "images"); err != nil {
+			return fmt.Errorf("shipping final images: %w", err)
+		}
+		if err := dst.putFile(bg, diffPath, "rootfs-diff.tar"); err != nil {
+			return fmt.Errorf("shipping rootfs diff: %w", err)
+		}
+		if len(srcAddrs) > 0 {
+			if err := dst.putFile(bg, filepath.Join(dir, "source-addrs"), "source-addrs"); err != nil {
+				return fmt.Errorf("shipping source addresses: %w", err)
+			}
+		}
+		return dst.ready(bg)
+	}
+	for attempt := 1; ; attempt++ {
+		err := ship()
+		if err == nil {
+			break
+		}
+		if attempt == 4 {
+			return res, err
+		}
+		emit(api.Event{Phase: "ship", Message: fmt.Sprintf("attempt %d failed, retrying: %v", attempt, err)})
+		time.Sleep(time.Duration(attempt) * time.Second)
 	}
 	res.ShipMS = since(t1)
 	res.ReadyAt = time.Now()
 	res.FrozenMS = res.ReadyAt.Sub(res.FreezeStart).Milliseconds()
 	emit(api.Event{Phase: "ready", Millis: res.FrozenMS, Message: "destination staged"})
 	return res, nil
+}
+
+// alive reports whether the container still has running (or frozen) processes.
+func alive(ctx context.Context, id string) bool {
+	st, err := runc.GetState(ctx, id)
+	return err == nil && (st.Status == "running" || st.Status == "paused")
+}
+
+// imagesComplete is a sanity check that a final dump wrote a restorable image set.
+func imagesComplete(dir string) bool {
+	for _, f := range []string{"inventory.img", "pstree.img"} {
+		if _, err := os.Stat(filepath.Join(dir, f)); err != nil {
+			return false
+		}
+	}
+	return true
 }
 
 // keepLogs copies CRIU's logs out of the (RAM-backed, soon deleted) image dir to

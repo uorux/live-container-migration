@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -38,7 +39,9 @@ func main() {
 	for _, d := range []string{"ckpt", "restore", "fence"} {
 		os.MkdirAll(stage.Root()+"/"+d, 0o700)
 	}
-	srv := &http.Server{Addr: *listen, Handler: agent.New(token, *binDir, log).Handler(), ReadHeaderTimeout: 10 * time.Second}
+	a := agent.New(token, *binDir, log)
+	go a.GC(context.Background(), 14*24*time.Hour)
+	srv := &http.Server{Addr: *listen, Handler: a.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	log.Info("lcm-agent listening", "addr", *listen, "state", stage.Root())
 	if err := srv.ListenAndServe(); err != nil {
 		log.Error("serve", "err", err)

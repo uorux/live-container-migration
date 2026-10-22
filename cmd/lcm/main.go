@@ -41,6 +41,7 @@ func main() {
 	relay := fs.String("relay", "auto", "lcm-relay handshake: auto, required, off")
 	waitImage := fs.String("wait-image", "", "image for the destination's wait init container (default busybox)")
 	asJSON := fs.Bool("json", false, "print the result as JSON")
+	allowManaged := fs.Bool("allow-managed", false, "migrate a pod with GitOps (Flux/Helm) labels; suspend reconciliation first")
 	fs.Parse(os.Args[3:])
 	if *to == "" {
 		fmt.Fprintln(os.Stderr, "--to is required")
@@ -65,7 +66,7 @@ func main() {
 	start := time.Now()
 	opts := controller.Options{
 		Namespace: *ns, Pod: pod, Container: *ctr, TargetNode: *to,
-		Token: strings.TrimSpace(string(tok)), WaitImage: *waitImage, Relay: *relay,
+		Token: strings.TrimSpace(string(tok)), WaitImage: *waitImage, Relay: *relay, AllowManaged: *allowManaged,
 		PreDump: api.PreDumpPolicy{Max: *preMax, TargetBytes: *preTarget},
 		Log: func(f string, a ...any) {
 			fmt.Fprintf(os.Stderr, "%7.3fs "+f+"\n", append([]any{time.Since(start).Seconds()}, a...)...)

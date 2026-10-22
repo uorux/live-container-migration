@@ -13,6 +13,7 @@ type CheckpointRequest struct {
 	MigrationID string `json:"migrationID"`
 	Namespace   string `json:"namespace"`
 	Pod         string `json:"pod"`
+	PodUID      string `json:"podUID"` // the source pod's UID: its fence key
 	Container   string `json:"container"`
 	ContainerID string `json:"containerID"` // containerd id, without the "containerd://" prefix
 	// Key under which the destination stages the restore (namespace/destination pod/container).

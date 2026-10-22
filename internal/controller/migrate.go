@@ -47,6 +47,7 @@ type Options struct {
 	WaitImage                             string
 	PreDump                               api.PreDumpPolicy
 	Relay                                 string
+	AllowManaged                          bool // migrate pods carrying GitOps labels (reconciliation suspended)
 	Log                                   func(format string, a ...any)
 }
 
@@ -74,7 +75,7 @@ func Migrate(ctx context.Context, kc kubernetes.Interface, o Options) (*Result, 
 	if err != nil {
 		return nil, err
 	}
-	if err := checkMigratable(src); err != nil {
+	if err := checkMigratable(src); err != nil && !(o.AllowManaged && strings.Contains(err.Error(), "GitOps")) {
 		return nil, err
 	}
 	ctrName := o.Container
@@ -110,14 +111,23 @@ func Migrate(ctx context.Context, kc kubernetes.Interface, o Options) (*Result, 
 	key := stage.Key{Namespace: o.Namespace, Pod: res.DestPod, Container: ctrName}.String()
 	logf("migration %s: %s/%s (%s) -> %s on %s", res.MigrationID, o.Namespace, src.Name, src.Spec.NodeName, res.DestPod, o.TargetNode)
 
-	// 1. Destination pod, parked in its wait init container.
+	// 1. Destination pod, parked in its wait init container. Any leftover staging under this key
+	// (an earlier run that died before cleanup) goes first, or the wait would pass on stale images.
+	if _, err := agentDo(ctx, dstURL, o.Token, http.MethodDelete, "/v1/stage/"+key, nil); err != nil {
+		return nil, fmt.Errorf("resetting staging on %s: %w", o.TargetNode, err)
+	}
 	dst := destinationPod(src, res, o.WaitImage, key, o.AgentPort)
-	if _, err := pods.Create(ctx, dst, metav1.CreateOptions{}); err != nil {
+	created, err := pods.Create(ctx, dst, metav1.CreateOptions{})
+	if err != nil {
 		return nil, fmt.Errorf("creating destination pod: %w", err)
 	}
+	destUID := string(created.UID)
 	cleanupDest := func() {
-		pods.Delete(context.WithoutCancel(ctx), res.DestPod, metav1.DeleteOptions{GracePeriodSeconds: ptr(int64(0))})
-		agentDo(context.WithoutCancel(ctx), dstURL, o.Token, http.MethodDelete, "/v1/stage/"+key, nil)
+		// Fence before deleting: whatever happens to staging, this pod must never restore.
+		bg := context.WithoutCancel(ctx)
+		agentDo(bg, dstURL, o.Token, http.MethodPost, "/v1/fence/"+destUID+"?key="+key, nil)
+		pods.Delete(bg, res.DestPod, metav1.DeleteOptions{})
+		agentDo(bg, dstURL, o.Token, http.MethodDelete, "/v1/stage/"+key, nil)
 	}
 	t0 := time.Now()
 	if err := waitPod(ctx, kc, o.Namespace, res.DestPod, 3*time.Minute, func(p *corev1.Pod) (bool, error) {
@@ -138,7 +148,7 @@ func Migrate(ctx context.Context, kc kubernetes.Interface, o Options) (*Result, 
 
 	// 2. Checkpoint on the source, streamed progress.
 	req := api.CheckpointRequest{MigrationID: res.MigrationID, Namespace: o.Namespace, Pod: src.Name,
-		Container: ctrName, ContainerID: ctrID, DestKey: key, DestURL: dstURL, PreDump: o.PreDump, Relay: o.Relay}
+		PodUID: string(src.UID), Container: ctrName, ContainerID: ctrID, DestKey: key, DestURL: dstURL, PreDump: o.PreDump, Relay: o.Relay}
 	ck, err := runCheckpoint(ctx, srcURL, o.Token, req, logf)
 	res.Checkpoint = ck
 	if err != nil {
@@ -146,8 +156,10 @@ func Migrate(ctx context.Context, kc kubernetes.Interface, o Options) (*Result, 
 			cleanupDest()
 			return res, fmt.Errorf("checkpoint failed, source left running: %w", err)
 		}
-		return res, fmt.Errorf("checkpoint failed AFTER the source was stopped; its images are on %s under "+
-			"/var/lib/lcm/ckpt/%s and can be restored there: %w", res.SourceNode, res.MigrationID, err)
+		return res, fmt.Errorf("checkpoint failed AFTER the source was stopped (the agent retried shipping): %w; "+
+			"the final dump is on %s under /var/lib/lcm/ckpt/%s and the pre-dumps on %s under /var/lib/lcm/restore/%s: "+
+			"copy the former's images/, rootfs-diff.tar and source-addrs into the latter, touch READY and run lcm recover",
+			err, res.SourceNode, res.MigrationID, o.TargetNode, key)
 	}
 
 	// 3. Wait for the restored container. If the restore fails, the source is already gone:
@@ -158,16 +170,17 @@ func Migrate(ctx context.Context, kc kubernetes.Interface, o Options) (*Result, 
 		// kubelet retries failed containers on its own, and a retry may restore fine. Fence the
 		// destination pod so no further attempt can start, then make sure none already has:
 		// two live copies of one workload must never exist.
-		if _, ferr := agentDo(ctx, dstURL, o.Token, http.MethodPost, "/v1/fence/"+o.Namespace+"/"+res.DestPod, nil); ferr != nil {
+		// The fence call waits for any restore in flight (they share a lock) and stops new ones.
+		if _, ferr := agentDo(ctx, dstURL, o.Token, http.MethodPost, "/v1/fence/"+destUID+"?key="+key, nil); ferr != nil {
 			return res, fmt.Errorf("restore failed and fencing the destination failed too (%v): %w", ferr, err)
 		}
-		running, rerr := containerRunning(ctx, kc, o.Namespace, res.DestPod, ctrName)
-		if rerr != nil {
-			return res, fmt.Errorf("restore failed and destination state is unknown (%v): %w", rerr, err)
-		}
-		if running {
+		if restoredOK(ctx, dstURL, o.Token, key) {
+			// A retry won the race and restored fine: keep it, and lift the fence we just set
+			// (it would block this healthy pod's future restarts).
 			logf("a kubelet retry restored the container after all; keeping it")
-			agentDo(ctx, dstURL, o.Token, http.MethodDelete, "/v1/fence/"+o.Namespace+"/"+res.DestPod, nil)
+			if _, ferr := agentDo(ctx, dstURL, o.Token, http.MethodDelete, "/v1/fence/"+destUID, nil); ferr != nil {
+				logf("warning: lifting the destination fence: %v", ferr)
+			}
 			goto restored
 		}
 		rb, rerr := rollback(ctx, kc, o, src, res, ctrName, key, srcURL, dstURL, logf)
@@ -188,16 +201,14 @@ restored:
 	}
 	logf("restored on %s: restore %dms, relay resume %q, blackout %s", res.DestNode, rr.RestoreMS, rr.RelayResume, res.Blackout.Round(time.Millisecond))
 
-	// 4. Retire the source.
-	if err := pods.Delete(ctx, src.Name, metav1.DeleteOptions{GracePeriodSeconds: ptr(int64(0))}); err != nil && !apierrors.IsNotFound(err) {
-		logf("warning: deleting source pod: %v", err)
+	// 4. Retire the source. Its fence stays (keyed by its UID, garbage-collected by the agent);
+	// a graceful delete lets kubelet confirm the sandbox is gone.
+	if !rolledBack {
+		if err := deletePodAndWait(ctx, kc, o.Namespace, src.Name); err != nil {
+			logf("warning: deleting source pod: %v", err)
+		}
 	}
-	wait.PollUntilContextTimeout(ctx, 500*time.Millisecond, time.Minute, true, func(ctx context.Context) (bool, error) {
-		_, err := pods.Get(ctx, src.Name, metav1.GetOptions{})
-		return apierrors.IsNotFound(err), nil
-	})
 	for _, call := range []struct{ url, method, path string }{
-		{srcURL, http.MethodDelete, "/v1/fence/" + o.Namespace + "/" + src.Name},
 		{srcURL, http.MethodDelete, "/v1/ckpt/" + res.MigrationID},
 		{dstURL, http.MethodDelete, "/v1/stage/" + key},
 	} {
@@ -213,7 +224,7 @@ restored:
 
 func deletePodAndWait(ctx context.Context, kc kubernetes.Interface, ns, name string) error {
 	pods := kc.CoreV1().Pods(ns)
-	if err := pods.Delete(ctx, name, metav1.DeleteOptions{GracePeriodSeconds: ptr(int64(0))}); err != nil && !apierrors.IsNotFound(err) {
+	if err := pods.Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
 		return err
 	}
 	return wait.PollUntilContextTimeout(ctx, 250*time.Millisecond, 2*time.Minute, true, func(ctx context.Context) (bool, error) {
@@ -259,26 +270,20 @@ func Recover(ctx context.Context, kc kubernetes.Interface, o Options, imagesNode
 	if err != nil {
 		return res, err
 	}
-	agentDo(ctx, tgtURL, o.Token, http.MethodDelete, "/v1/fence/"+o.Namespace+"/"+src.Name, nil)
 	agentDo(ctx, tgtURL, o.Token, http.MethodDelete, "/v1/stage/"+rb.key, nil)
 	res.DestPod, res.DestNode = rb.DestPod, rb.DestNode
 	return res, nil
 }
 
-// containerRunning reports whether ctr in pod is running, after giving any in-flight container
-// creation time to settle (a fenced create is refused within milliseconds).
-func containerRunning(ctx context.Context, kc kubernetes.Interface, ns, pod, ctr string) (bool, error) {
-	time.Sleep(3 * time.Second)
-	p, err := kc.CoreV1().Pods(ns).Get(ctx, pod, metav1.GetOptions{})
+// restoredOK reports whether lcm-runc's last restore attempt for key succeeded. Call it after
+// fencing the key: the fence waits out a restore in flight, so the answer is final.
+func restoredOK(ctx context.Context, url, token, key string) bool {
+	b, err := agentDo(ctx, url, token, http.MethodGet, "/v1/stage/"+key+"/result", nil)
 	if err != nil {
-		return false, err
+		return false
 	}
-	for _, s := range p.Status.ContainerStatuses {
-		if s.Name == ctr && s.State.Running != nil {
-			return true, nil
-		}
-	}
-	return false, nil
+	var rr api.RestoreResult
+	return json.Unmarshal(b, &rr) == nil && rr.ExitCode == 0 && rr.Error == ""
 }
 
 func waitRestored(ctx context.Context, kc kubernetes.Interface, ns, pod, ctr string) error {
@@ -314,10 +319,12 @@ func rollback(ctx context.Context, kc kubernetes.Interface, o Options, src *core
 			return nil, err
 		}
 	}
-	agentDo(ctx, dstURL, o.Token, http.MethodDelete, "/v1/fence/"+o.Namespace+"/"+res.DestPod, nil)
 	rb := *res
 	rb.DestPod, rb.DestNode = nextName(res.DestPod), res.SourceNode
 	rbKey := stage.Key{Namespace: o.Namespace, Pod: rb.DestPod, Container: ctr}.String()
+	if _, err := agentDo(ctx, srcURL, o.Token, http.MethodDelete, "/v1/stage/"+rbKey, nil); err != nil {
+		return nil, fmt.Errorf("resetting staging on %s: %w", res.SourceNode, err)
+	}
 	if _, err := pods.Create(ctx, destinationPod(src, &rb, o.WaitImage, rbKey, o.AgentPort), metav1.CreateOptions{}); err != nil {
 		return nil, fmt.Errorf("creating rollback pod: %w", err)
 	}
@@ -344,7 +351,15 @@ func rollback(ctx context.Context, kc kubernetes.Interface, o Options, src *core
 	return &rollbackResult{DestPod: rb.DestPod, DestNode: rb.DestNode, key: rbKey}, nil
 }
 
+// managedLabels mark pods a GitOps controller would recreate after the migration deletes them.
+var managedLabels = []string{"kustomize.toolkit.fluxcd.io/name", "helm.toolkit.fluxcd.io/name", "app.kubernetes.io/managed-by"}
+
 func checkMigratable(p *corev1.Pod) error {
+	for _, l := range managedLabels {
+		if v, ok := p.Labels[l]; ok && (l != "app.kubernetes.io/managed-by" || v == "Helm") {
+			return fmt.Errorf("pod carries %s=%s: its GitOps controller would recreate it after the migration (two servers on one world); manage it with something migration-aware, or suspend reconciliation and pass --allow-managed", l, v)
+		}
+	}
 	if p.Spec.RuntimeClassName == nil || *p.Spec.RuntimeClassName != RuntimeClass {
 		return fmt.Errorf("pod must use runtimeClassName %q (it fences the source and restores the destination)", RuntimeClass)
 	}
@@ -468,7 +483,35 @@ func runCheckpoint(ctx context.Context, url, token string, req api.CheckpointReq
 			logf("  %-8s round=%d bytes=%s %dms %s", ev.Phase, ev.Round, human(ev.Bytes), ev.Millis, ev.Message)
 		}
 	}
-	return last, fmt.Errorf("source agent stream ended without a result: %v", sc.Err())
+	// The stream broke (network, agent restart, ...). After the fence the agent carries on
+	// regardless, so ask it how things ended instead of guessing.
+	logf("  progress stream lost (%v); polling the source agent for the outcome", sc.Err())
+	return pollCheckpoint(ctx, url, token, req.MigrationID, last)
+}
+
+func pollCheckpoint(ctx context.Context, url, token, id string, last *api.CheckpointResult) (*api.CheckpointResult, error) {
+	var st struct {
+		Done   bool                  `json:"done"`
+		Error  string                `json:"error"`
+		Result *api.CheckpointResult `json:"result"`
+	}
+	err := wait.PollUntilContextTimeout(context.WithoutCancel(ctx), time.Second, 15*time.Minute, true, func(ctx context.Context) (bool, error) {
+		b, err := agentDo(ctx, url, token, http.MethodGet, "/v1/checkpoint/"+id, nil)
+		if err != nil {
+			return false, nil // agent unreachable for now; keep trying
+		}
+		return json.Unmarshal(b, &st) == nil && st.Done, nil
+	})
+	if err != nil {
+		return last, fmt.Errorf("lost track of the checkpoint (source agent unreachable): its state is unknown; check `journalctl -u lcm-agent` on the source node")
+	}
+	if st.Result == nil {
+		st.Result = last
+	}
+	if st.Error != "" {
+		return st.Result, fmt.Errorf("%s", st.Error)
+	}
+	return st.Result, nil
 }
 
 func agentDo(ctx context.Context, url, token, method, path string, body io.Reader) ([]byte, error) {

@@ -13,8 +13,11 @@
 //	GET    /v1/stage/{key}/wait           destination: long-poll until ready (used by the pod's init
 //	                                      container; unauthenticated, reveals only readiness)
 //	GET    /v1/stage/{key}/result         destination: lcm-runc's restore result, once there
+//	GET    /v1/checkpoint/{id}            source: status/result of a checkpoint (if the stream broke)
 //	DELETE /v1/ckpt/{migrationID}         source: drop checkpoint images after success
-//	POST   /v1/fence/{ns}/{pod}           source: (un)fence by hand: POST fences, DELETE lifts
+//	POST   /v1/fence/{uid}[?key=K]        fence a pod by UID so its containers never start here
+//	                                      again; with key, also stop any staged restore for K
+//	DELETE /v1/fence/{uid}                lift a fence (only for aborts; UIDs are never reused)
 //	GET    /v1/bin/{name}                 lcm-relay / lcm-gateway / lcm-loadtest binaries, so pods
 //	                                      can inject them from a stock image (no registry needed)
 //	GET    /healthz
@@ -47,11 +50,36 @@ type Agent struct {
 	log    *slog.Logger
 
 	mu         sync.Mutex
-	migrations map[string]bool // in-flight checkpoints, by container id
+	migrations map[string]bool          // in-flight checkpoints, by container id
+	status     map[string]*checkpointSt // by migration id, for GET /v1/checkpoint/{id}
+}
+
+type checkpointSt struct {
+	Done   bool                  `json:"done"`
+	Error  string                `json:"error,omitempty"`
+	Last   api.Event             `json:"last"`
+	Result *api.CheckpointResult `json:"result,omitempty"`
 }
 
 func New(token, binDir string, log *slog.Logger) *Agent {
-	return &Agent{token: token, binDir: binDir, log: log, migrations: map[string]bool{}}
+	return &Agent{token: token, binDir: binDir, log: log, migrations: map[string]bool{}, status: map[string]*checkpointSt{}}
+}
+
+// GC periodically removes fences older than maxAge (their pods are long gone; UIDs never repeat).
+func (a *Agent) GC(ctx context.Context, maxAge time.Duration) {
+	for {
+		fences, _ := filepath.Glob(filepath.Join(stage.Root(), "fence", "*"))
+		for _, f := range fences {
+			if fi, err := os.Stat(f); err == nil && time.Since(fi.ModTime()) > maxAge {
+				os.Remove(f)
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Hour):
+		}
+	}
 }
 
 func (a *Agent) Handler() http.Handler {
@@ -65,9 +93,10 @@ func (a *Agent) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/stage/{key}/forward", a.auth(a.handleForward))
 	mux.HandleFunc("GET /v1/stage/{key}/wait", a.handleWait)
 	mux.HandleFunc("GET /v1/stage/{key}/result", a.auth(a.handleResult))
+	mux.HandleFunc("GET /v1/checkpoint/{id}", a.auth(a.handleCheckpointStatus))
 	mux.HandleFunc("DELETE /v1/ckpt/{id}", a.auth(a.handleDeleteCkpt))
-	mux.HandleFunc("POST /v1/fence/{ns}/{pod}", a.auth(a.handleFence))
-	mux.HandleFunc("DELETE /v1/fence/{ns}/{pod}", a.auth(a.handleFence))
+	mux.HandleFunc("POST /v1/fence/{uid}", a.auth(a.handleFence))
+	mux.HandleFunc("DELETE /v1/fence/{uid}", a.auth(a.handleFence))
 	mux.HandleFunc("GET /v1/bin/{name}", func(w http.ResponseWriter, r *http.Request) {
 		switch name := r.PathValue("name"); name {
 		case "lcm-relay", "lcm-gateway", "lcm-loadtest":
@@ -97,8 +126,14 @@ func (a *Agent) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if req.ContainerID == "" || req.DestURL == "" || req.DestKey == "" || req.MigrationID == "" {
-		http.Error(w, "containerID, destURL, destKey and migrationID are required", http.StatusBadRequest)
+	for _, f := range []string{req.MigrationID, req.Namespace, req.Pod, req.PodUID, req.DestKey, req.ContainerID} {
+		if !stage.ValidName(f) {
+			http.Error(w, "migrationID, namespace, pod, podUID, destKey and containerID must be valid names", http.StatusBadRequest)
+			return
+		}
+	}
+	if req.DestURL == "" {
+		http.Error(w, "destURL is required", http.StatusBadRequest)
 		return
 	}
 	a.mu.Lock()
@@ -108,6 +143,8 @@ func (a *Agent) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.migrations[req.ContainerID] = true
+	st := &checkpointSt{}
+	a.status[req.MigrationID] = st
 	a.mu.Unlock()
 	defer func() { a.mu.Lock(); delete(a.migrations, req.ContainerID); a.mu.Unlock() }()
 
@@ -116,15 +153,27 @@ func (a *Agent) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 	enc := json.NewEncoder(w)
 	emit := func(ev api.Event) {
 		ev.Time = time.Now()
+		a.mu.Lock()
+		st.Last = ev
+		if ev.Result != nil {
+			st.Result = ev.Result
+		}
+		switch ev.Phase {
+		case "error":
+			st.Done, st.Error = true, ev.Message
+		case "done":
+			st.Done = true
+		}
+		a.mu.Unlock()
 		a.log.Info("checkpoint", "migration", req.MigrationID, "phase", ev.Phase, "round", ev.Round, "bytes", ev.Bytes, "ms", ev.Millis, "msg", ev.Message)
 		enc.Encode(ev)
 		if flusher != nil {
 			flusher.Flush()
 		}
 	}
-	// Deliberately not r.Context(): once the final dump starts, a dropped client connection must
-	// not abort shipping the only copy of the workload's state.
-	res, err := a.checkpoint(context.WithoutCancel(r.Context()), req, emit)
+	// The client can cancel only until the fence is written (see checkpoint); a dropped stream
+	// after that doesn't stop anything, and GET /v1/checkpoint/{id} reports the outcome.
+	res, err := a.checkpoint(r.Context(), req, emit)
 	if err != nil {
 		ev := api.Event{Phase: "error", Message: err.Error(), Result: res}
 		emit(ev)
@@ -140,6 +189,22 @@ func (a *Agent) stageKey(w http.ResponseWriter, r *http.Request) (string, bool) 
 		return "", false
 	}
 	return filepath.Join(stage.Root(), "restore", key), true
+}
+
+func (a *Agent) handleCheckpointStatus(w http.ResponseWriter, r *http.Request) {
+	a.mu.Lock()
+	st, ok := a.status[r.PathValue("id")]
+	var b []byte
+	if ok {
+		b, _ = json.Marshal(st)
+	}
+	a.mu.Unlock()
+	if !ok {
+		http.Error(w, "unknown migration", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(b)
 }
 
 func validName(n string) bool {
@@ -211,7 +276,12 @@ func (a *Agent) handleDeleteStage(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := os.RemoveAll(dir); err != nil {
+	// A reset for a new migration also drops the previous one's tombstone (see handleWait).
+	err := os.RemoveAll(dir)
+	if rerr := os.Remove(stage.ConsumedFile(r.PathValue("key"))); err == nil && rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+		err = rerr
+	}
+	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}
@@ -282,11 +352,11 @@ func (a *Agent) handleWait(w http.ResponseWriter, r *http.Request) {
 	}
 	deadline := time.Now().Add(timeout)
 	for {
-		for _, f := range []string{"READY", "READY.consumed"} {
-			if _, err := os.Stat(filepath.Join(dir, f)); err == nil {
-				w.WriteHeader(http.StatusNoContent)
-				return
-			}
+		_, rerr := os.Stat(filepath.Join(dir, "READY"))
+		_, cerr := os.Stat(stage.ConsumedFile(r.PathValue("key")))
+		if rerr == nil || cerr == nil {
+			w.WriteHeader(http.StatusNoContent)
+			return
 		}
 		if time.Now().After(deadline) {
 			http.Error(w, "not ready", http.StatusRequestTimeout)
@@ -331,20 +401,38 @@ func (a *Agent) handleDeleteCkpt(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *Agent) handleFence(w http.ResponseWriter, r *http.Request) {
-	ns, pod := r.PathValue("ns"), r.PathValue("pod")
-	if !validName(ns) || !validName(pod) {
-		http.Error(w, "bad pod", http.StatusBadRequest)
+	uid, key := r.PathValue("uid"), r.URL.Query().Get("key")
+	if !stage.ValidName(uid) || (key != "" && !stage.ValidName(key)) {
+		http.Error(w, "bad uid or key", http.StatusBadRequest)
 		return
 	}
-	f := stage.FenceFile(ns, pod)
-	var err error
+	f := stage.FenceFile(uid)
 	if r.Method == http.MethodDelete {
-		err = os.Remove(f)
-		if errors.Is(err, os.ErrNotExist) {
-			err = nil
+		if err := os.Remove(f); err != nil && !errors.Is(err, os.ErrNotExist) {
+			http.Error(w, err.Error(), 500)
+			return
 		}
-	} else if err = os.MkdirAll(filepath.Dir(f), 0o755); err == nil {
-		err = os.WriteFile(f, []byte("manual"), 0o644)
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if key != "" {
+		// Wait out any restore lcm-runc is doing for this key, and keep new ones from starting.
+		unlock, err := stage.Lock(key)
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		defer unlock()
+	}
+	err := os.MkdirAll(filepath.Dir(f), 0o755)
+	if err == nil {
+		err = os.WriteFile(f, []byte("fenced via API "+time.Now().Format(time.RFC3339)), 0o644)
+	}
+	if err == nil && key != "" {
+		ready := filepath.Join(stage.Root(), "restore", key, "READY")
+		if rerr := os.Rename(ready, ready+".fenced"); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+			err = rerr
+		}
 	}
 	if err != nil {
 		http.Error(w, err.Error(), 500)

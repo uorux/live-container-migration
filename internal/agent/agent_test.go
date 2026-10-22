@@ -159,8 +159,8 @@ func TestMutatingEndpointsRequireAuth(t *testing.T) {
 		{"POST", "/v1/stage/" + key + "/forward"},
 		{"GET", "/v1/stage/" + key + "/result"},
 		{"DELETE", "/v1/ckpt/mig"},
-		{"POST", "/v1/fence/games/mc"},
-		{"DELETE", "/v1/fence/games/mc"},
+		{"POST", "/v1/fence/uid-1"},
+		{"DELETE", "/v1/fence/uid-1"},
 	}
 	for _, e := range endpoints {
 		for _, tok := range []string{"", "wrong", testToken + "x", strings.ToUpper(testToken)} {
@@ -190,7 +190,7 @@ func TestMutatingEndpointsRequireAuth(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, "ckpt", "mig")); err != nil {
 		t.Errorf("checkpoint removed by unauthenticated call: %v", err)
 	}
-	if stage.IsFenced("games", "mc") {
+	if stage.IsFenced("uid-1") {
 		t.Errorf("unauthenticated call fenced a pod")
 	}
 	// Unauthenticated read-only endpoints stay open.
@@ -253,10 +253,16 @@ func TestReadyAndWait(t *testing.T) {
 		t.Fatalf("waiter not released after READY")
 	}
 
-	// lcm-runc renames READY when it consumes the restore; wait still reports ready.
+	// lcm-runc renames READY and writes a persistent tombstone when it consumes the restore; wait
+	// still reports ready (a recreated sandbox after a reboot must not hang in its wait container).
 	if err := os.Rename(filepath.Join(dir, "READY"), filepath.Join(dir, "READY.consumed")); err != nil {
 		t.Fatal(err)
 	}
+	os.MkdirAll(filepath.Join(root, "consumed"), 0o755)
+	if err := os.WriteFile(stage.ConsumedFile(key), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	os.RemoveAll(filepath.Join(root, "restore")) // tmpfs wiped by the reboot
 	if resp := do(t, "GET", srv.URL+"/v1/stage/"+key+"/wait?timeout=100ms", "", nil); resp.StatusCode != http.StatusNoContent {
 		t.Errorf("wait after consume: %d, want 204", resp.StatusCode)
 	}
@@ -267,6 +273,9 @@ func TestReadyAndWait(t *testing.T) {
 	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Errorf("stage dir still there: %v", err)
+	}
+	if _, err := os.Stat(stage.ConsumedFile(key)); !os.IsNotExist(err) {
+		t.Errorf("stage reset kept the old tombstone: %v", err)
 	}
 	if resp := do(t, "GET", srv.URL+"/v1/stage/"+key+"/wait?timeout=50ms", "", nil); resp.StatusCode != http.StatusRequestTimeout {
 		t.Errorf("wait after delete: %d, want 408", resp.StatusCode)
@@ -290,7 +299,7 @@ func TestStageKeyAndNameValidation(t *testing.T) {
 			t.Errorf("PUT %s accepted (%d)", path, resp.StatusCode)
 		}
 	}
-	for _, path := range []string{"/v1/fence/..%2F..%2Foutside/x", "/v1/fence/%2E%2E/x", "/v1/ckpt/%2E%2E"} {
+	for _, path := range []string{"/v1/fence/..%2F..%2Foutside", "/v1/fence/%2E%2E", "/v1/fence/ok?key=..%2Fx", "/v1/ckpt/%2E%2E"} {
 		for _, m := range []string{"POST", "DELETE"} {
 			resp := do(t, m, srv.URL+path, testToken, nil)
 			if resp.StatusCode/100 == 2 {
@@ -312,21 +321,52 @@ func TestStageKeyAndNameValidation(t *testing.T) {
 
 func TestFenceRoundTrip(t *testing.T) {
 	srv, _ := newTestServer(t)
-	if resp := do(t, "POST", srv.URL+"/v1/fence/games/mc", testToken, nil); resp.StatusCode != http.StatusNoContent {
+	if resp := do(t, "POST", srv.URL+"/v1/fence/uid-1", testToken, nil); resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("fence: %d", resp.StatusCode)
 	}
-	if !stage.IsFenced("games", "mc") {
+	if !stage.IsFenced("uid-1") {
 		t.Fatalf("not fenced")
 	}
-	if resp := do(t, "DELETE", srv.URL+"/v1/fence/games/mc", testToken, nil); resp.StatusCode != http.StatusNoContent {
+	if resp := do(t, "DELETE", srv.URL+"/v1/fence/uid-1", testToken, nil); resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("unfence: %d", resp.StatusCode)
 	}
-	if stage.IsFenced("games", "mc") {
+	if stage.IsFenced("uid-1") {
 		t.Fatalf("still fenced")
 	}
 	// Lifting a fence that isn't there is not an error (cleanup is idempotent).
-	if resp := do(t, "DELETE", srv.URL+"/v1/fence/games/mc", testToken, nil); resp.StatusCode != http.StatusNoContent {
+	if resp := do(t, "DELETE", srv.URL+"/v1/fence/uid-1", testToken, nil); resp.StatusCode != http.StatusNoContent {
 		t.Errorf("unfence twice: %d", resp.StatusCode)
+	}
+}
+
+func TestFenceWithKeyStopsStagedRestore(t *testing.T) {
+	srv, root := newTestServer(t)
+	key := "games_mc-m1_paper"
+	dir := filepath.Join(root, "restore", key)
+	os.MkdirAll(dir, 0o755)
+	os.WriteFile(filepath.Join(dir, "READY"), nil, 0o644)
+
+	// While lcm-runc holds the key's lock (a restore in flight), the fence call must wait.
+	unlock, err := stage.Lock(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan int, 1)
+	go func() { done <- do(t, "POST", srv.URL+"/v1/fence/uid-2?key="+key, testToken, nil).StatusCode }()
+	select {
+	case <-done:
+		t.Fatal("fence returned while a restore held the lock")
+	case <-time.After(200 * time.Millisecond):
+	}
+	unlock()
+	if code := <-done; code != http.StatusNoContent {
+		t.Fatalf("fence: %d", code)
+	}
+	if !stage.IsFenced("uid-2") {
+		t.Errorf("not fenced")
+	}
+	if stage.IsReady(stage.Key{Namespace: "games", Pod: "mc-m1", Container: "paper"}) {
+		t.Errorf("staged restore still READY after fencing")
 	}
 }
 
