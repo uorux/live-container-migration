@@ -294,6 +294,7 @@ func (c *Controller) takeOver(from string) {
 // ---- becoming active, stepping down ----
 
 func (c *Controller) activateLocked(why string) {
+	c.cfg.Gateway.ForwardTunnels("") // relays are ours again
 	if err := c.cfg.NS.Up(); err != nil {
 		c.log.Error("bringing the VIP up failed", "err", err)
 		return
@@ -432,6 +433,7 @@ func (c *Controller) HandOff(ctx context.Context) error {
 
 // rollback restores a frozen handoff here and brings the VIP back.
 func (c *Controller) rollback(h *gateway.Handoff, start time.Time, cause error) error {
+	c.cfg.Gateway.ForwardTunnels("")
 	conns, restored := c.restoreAll(h)
 	if err := c.cfg.NS.Up(); err != nil {
 		c.log.Error("VIP up after a failed handoff", "err", err)
@@ -572,6 +574,7 @@ func (c *Controller) serveHandoff(conn net.Conn) {
 		return
 	}
 	start := time.Now()
+	c.cfg.Gateway.ForwardTunnels("") // a gateway that handed off earlier serves relays again
 	conns, restored := c.restoreAll(&h)
 	if err := c.cfg.NS.Up(); err != nil {
 		c.mu.Unlock()

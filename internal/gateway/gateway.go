@@ -352,7 +352,14 @@ func (g *Gateway) ServeTunnel(ln net.Listener) error {
 // raw TCP, to addr: after a VIP handoff the relays reconnect here first
 // (their Service still points here for a moment) and reach the new gateway
 // without waiting for the Service to catch up.
-func (g *Gateway) ForwardTunnels(addr string) { g.tunnelForward.Store(&addr) }
+// An empty addr stops forwarding (this gateway serves relays again).
+func (g *Gateway) ForwardTunnels(addr string) {
+	if addr == "" {
+		g.tunnelForward.Store(nil)
+		return
+	}
+	g.tunnelForward.Store(&addr)
+}
 
 func forwardTunnel(c net.Conn, addr string, log *slog.Logger) {
 	defer c.Close()
