@@ -1,0 +1,8 @@
+# The router path's VIP gateway: hostNetwork, NET_ADMIN + SYS_ADMIN (docs/router-path.md), so
+# it lives in a namespace of its own, apart from the servers.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: minecraft-gw
+  labels:
+    pod-security.kubernetes.io/enforce: privileged

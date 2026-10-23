@@ -1,0 +1,112 @@
+# lcm-gateway -vip on every node behind 10.0.0.250, the router's port-forward target
+# (docs/router-path.md). A Lease picks the serving gateway; it hands its players to another on
+# SIGTERM (node drain, rollout) with ~0.1 s pauses. Relays reach any of them through
+# lcm-gateway-vip-tunnel; standbys forward to the serving one. The wake token Secret lcm-wake is
+# created and kept by the LivePod controller (services.lcm.livePods.wakeTokenSecrets).
+#
+# The VIP lives on an ipvlan in a private network namespace: no node NIC address ever changes.
+# The node serving it can't reach 10.0.0.250 itself (ipvlan doesn't hairpin); players can.
+# Until the router points at 10.0.0.250 this serves nobody (safe to deploy first).
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: lcm-gateway-vip, namespace: minecraft-gw}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: lcm-gateway-vip, namespace: minecraft-gw}
+rules:
+- {apiGroups: [coordination.k8s.io], resources: [leases], verbs: [get, create, update]}
+- {apiGroups: [""], resources: [pods], verbs: [get, list, patch]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: lcm-gateway-vip, namespace: minecraft-gw}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: lcm-gateway-vip}
+subjects: [{kind: ServiceAccount, name: lcm-gateway-vip, namespace: minecraft-gw}]
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata: {name: lcm-gateway-vip, namespace: minecraft-gw, labels: {app: lcm-gateway-vip}}
+spec:
+  selector: {matchLabels: {app: lcm-gateway-vip}}
+  updateStrategy: {rollingUpdate: {maxUnavailable: 1}}
+  template:
+    metadata: {labels: {app: lcm-gateway-vip}}
+    spec:
+      serviceAccountName: lcm-gateway-vip
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      # Long enough to hand off, then keep forwarding relays for 5 s.
+      terminationGracePeriodSeconds: 40
+      initContainers:
+      - name: fetch
+        image: busybox:1.37
+        # The node agent serves the lcm binaries of its own version.
+        command: ["sh", "-c", "wget -q -O /lcm/lcm-gateway http://$HOST_IP:7790/v1/bin/lcm-gateway && chmod +x /lcm/lcm-gateway"]
+        env: [{name: HOST_IP, valueFrom: {fieldRef: {fieldPath: status.hostIP}}}]
+        volumeMounts: [{name: bin, mountPath: /lcm}]
+      containers:
+      - name: gateway
+        image: busybox:1.37
+        command:
+        - /lcm/lcm-gateway
+        - -listen=:25565
+        - -tunnel-listen=:7001
+        - -admin-listen=:8081
+        - -token-file=/secret/token
+        - -vip=10.0.0.250/24
+        - -vip-parent=enp0s7
+        - -vip-gateway=10.0.0.1
+        - -handoff-port=7792
+        - -minecraft
+        - -backend=sdfs
+        - -backends=atm9,atm10,bettermc,evolution,ob2,sb4,skies2,p2haustian,dungeonheroes,integratedmc,abyssalascent
+        - -menu
+        - -menu-title=rooty.dev Minecraft
+        - -motd={backend} is starting, hang tight
+        # Any agent can take a wake; the one leading the LivePod controller acts (others: 503).
+        - -wake-url=http://100.126.30.73:7790,http://100.103.225.29:7790,http://100.65.16.13:7790
+        - -wake-token-file=/wake/token
+        env:
+        - {name: POD_NAME, valueFrom: {fieldRef: {fieldPath: metadata.name}}}
+        - {name: POD_NAMESPACE, valueFrom: {fieldRef: {fieldPath: metadata.namespace}}}
+        securityContext:
+          capabilities: {add: [NET_ADMIN, SYS_ADMIN]}
+        ports: [{name: admin, containerPort: 8081}, {name: tunnel, containerPort: 7001}]
+        readinessProbe: {httpGet: {path: /healthz, port: 8081}, periodSeconds: 2}
+        resources: {requests: {cpu: 50m, memory: 64Mi}, limits: {memory: 512Mi}}
+        volumeMounts:
+        - {name: bin, mountPath: /lcm}
+        - {name: secret, mountPath: /secret, readOnly: true}
+        - {name: wake, mountPath: /wake, readOnly: true}
+      volumes:
+      - {name: bin, emptyDir: {}}
+      - {name: secret, secret: {secretName: lcm-tunnel}}
+      - {name: wake, secret: {secretName: lcm-wake}}
+---
+# Relays (namespace minecraft) dial this: any gateway pod works, standbys forward.
+apiVersion: v1
+kind: Service
+metadata: {name: lcm-gateway-vip-tunnel, namespace: minecraft-gw, labels: {app: lcm-gateway-vip}}
+spec:
+  selector: {app: lcm-gateway-vip}
+  ports: [{name: tunnel, port: 7001, targetPort: 7001}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: lcm-gateway-vip-admin, namespace: minecraft-gw, labels: {app: lcm-gateway-vip}}
+spec:
+  selector: {app: lcm-gateway-vip}
+  clusterIP: None
+  ports: [{name: admin, port: 8081, targetPort: 8081}]
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata: {name: lcm-gateway-vip, namespace: minecraft-gw}
+spec:
+  selector:
+    matchLabels: {app: lcm-gateway-vip}
+  endpoints:
+  - port: admin
+    path: /metrics
+    interval: 30s
