@@ -341,7 +341,11 @@ func (g *Gateway) ServeTunnel(ln net.Listener) error {
 			continue
 		}
 		if fwd := g.tunnelForward.Load(); fwd != nil {
-			go forwardTunnel(c, *fwd, g.log)
+			if *fwd == RefuseTunnels {
+				c.Close()
+			} else {
+				go forwardTunnel(c, *fwd, g.log)
+			}
 			continue
 		}
 		go g.handleTunnel(c)
@@ -352,7 +356,9 @@ func (g *Gateway) ServeTunnel(ln net.Listener) error {
 // raw TCP, to addr: after a VIP handoff the relays reconnect here first
 // (their Service still points here for a moment) and reach the new gateway
 // without waiting for the Service to catch up.
-// An empty addr stops forwarding (this gateway serves relays again).
+// An empty addr stops forwarding (this gateway serves relays again);
+// RefuseTunnels closes relay connections instead (a standby that doesn't know
+// the active gateway yet must not start a session of its own with a relay).
 func (g *Gateway) ForwardTunnels(addr string) {
 	if addr == "" {
 		g.tunnelForward.Store(nil)
@@ -360,6 +366,9 @@ func (g *Gateway) ForwardTunnels(addr string) {
 	}
 	g.tunnelForward.Store(&addr)
 }
+
+// RefuseTunnels is the ForwardTunnels address that refuses relays.
+const RefuseTunnels = "refuse"
 
 func forwardTunnel(c net.Conn, addr string, log *slog.Logger) {
 	defer c.Close()

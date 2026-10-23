@@ -57,12 +57,12 @@ spec:
       - {name: bin, emptyDir: {}}
       - {name: secret, secret: {secretName: lcm-tunnel}}
 ---
-# Relays reach whichever gateway serves the VIP.
+# Relays may reach any gateway: standbys forward them to the one serving the VIP.
 apiVersion: v1
 kind: Service
 metadata: {name: lcm-gateway-vip-tunnel}
 spec:
-  selector: {app: lcm-gateway-vip, lcm.io/vip-active: "true"}
+  selector: {app: lcm-gateway-vip}
   ports: [{name: tunnel, port: 7001, targetPort: 7001}]
 ---
 apiVersion: v1

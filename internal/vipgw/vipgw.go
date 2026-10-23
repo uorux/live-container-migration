@@ -4,8 +4,11 @@
 // drained or the gateway is upgraded: the active gateway hands its players'
 // connections and its relay sessions to a standby, which takes the VIP over.
 //
-// Who is active is a Kubernetes Lease. The active gateway labels its pod
-// (ActiveLabel=true) so a Service can point relays at it. On SIGTERM it
+// Who is active is a Kubernetes Lease. Relays may reach any of the gateways
+// (a Service over all of them): standbys forward relay connections to the
+// active one, and right after a handoff the old one forwards to the new one,
+// so no relay waits for a Service to follow the VIP. The active gateway also
+// labels its pod (ActiveLabel=true), for people looking. On SIGTERM it
 // hands off to a ready standby (HandOff); if that fails it takes everything
 // back. If the active node dies instead, a standby takes the VIP when the
 // lease expires; the players connected through it are lost then.
@@ -75,6 +78,11 @@ type Controller struct {
 	lastRenew  time.Time
 	handingOff bool
 	stats      Stats
+	peerIP     map[string]string // the lease holder's pod IP (standby)
+	// handedTo/cooldown: after handing off, the lease may still name this
+	// gateway for a moment; it must not take that as its own until then.
+	handedTo string
+	cooldown time.Time
 }
 
 // Stats are reported on the admin endpoint.
@@ -131,6 +139,7 @@ func (c *Controller) Run(ctx context.Context) error {
 			go c.serveHandoff(conn)
 		}
 	}()
+	c.cfg.Gateway.ForwardTunnels(gateway.RefuseTunnels) // until we know who serves the VIP
 	c.setLabel(context.Background(), false)
 	t := time.NewTicker(c.cfg.RenewInterval)
 	defer t.Stop()
@@ -172,11 +181,37 @@ func (c *Controller) tick(ctx context.Context) {
 		}
 		return
 	}
-	if ok, err := c.tryAcquire(rctx); err != nil {
-		c.log.Debug("lease not acquired", "err", err)
-	} else if ok {
-		c.activateLocked("lease acquired")
+	if time.Now().Before(c.cooldown) {
+		c.forwardTo(rctx, c.handedTo)
+		return
 	}
+	ok, h, err := c.tryAcquire(rctx)
+	switch {
+	case err != nil:
+		c.log.Debug("lease not acquired", "err", err)
+		c.cfg.Gateway.ForwardTunnels(gateway.RefuseTunnels)
+	case ok:
+		c.activateLocked("lease acquired")
+	default:
+		c.forwardTo(rctx, h)
+	}
+}
+
+// forwardTo points this standby's relay connections at the gateway holding
+// the lease.
+func (c *Controller) forwardTo(ctx context.Context, holder string) {
+	ip := c.peerIP[holder]
+	if ip == "" {
+		if p, err := c.cfg.Kube.CoreV1().Pods(c.cfg.Namespace).Get(ctx, holder, metav1.GetOptions{}); err == nil && p.Status.PodIP != "" {
+			ip = p.Status.PodIP
+			c.peerIP = map[string]string{holder: ip}
+		}
+	}
+	if ip == "" || c.cfg.TunnelPort == 0 {
+		c.cfg.Gateway.ForwardTunnels(gateway.RefuseTunnels)
+		return
+	}
+	c.cfg.Gateway.ForwardTunnels(net.JoinHostPort(ip, strconv.Itoa(c.cfg.TunnelPort)))
 }
 
 // ---- lease ----
@@ -240,25 +275,26 @@ func (c *Controller) renew(ctx context.Context) error {
 }
 
 // tryAcquire takes the lease if nobody holds it, it has expired, or it
-// already names this gateway (a handoff in, or a restart).
-func (c *Controller) tryAcquire(ctx context.Context) (bool, error) {
+// already names this gateway (a handoff in, or a restart). Otherwise it
+// returns the current holder.
+func (c *Controller) tryAcquire(ctx context.Context) (bool, string, error) {
 	now := time.Now()
 	l, err := c.leases().Get(ctx, c.cfg.Lease, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		l = &coordv1.Lease{ObjectMeta: metav1.ObjectMeta{Name: c.cfg.Lease, Namespace: c.cfg.Namespace}}
 		c.claim(l, now)
 		_, err = c.leases().Create(ctx, l, metav1.CreateOptions{})
-		return err == nil, err
+		return err == nil, "", err
 	}
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
-	if holder(l) != c.cfg.Identity && !c.expired(l, now) {
-		return false, nil
+	if h := holder(l); h != c.cfg.Identity && !c.expired(l, now) {
+		return false, h, nil
 	}
 	c.claim(l, now)
 	_, err = c.leases().Update(ctx, l, metav1.UpdateOptions{})
-	return err == nil, err
+	return err == nil, "", err
 }
 
 // takeOver points the lease at this gateway after a handoff from `from`.
@@ -322,6 +358,7 @@ func (c *Controller) stepDownLocked(why string) {
 		return
 	}
 	c.active.Store(false)
+	c.cfg.Gateway.ForwardTunnels(gateway.RefuseTunnels) // until the next tick finds the new holder
 	if err := c.cfg.NS.Down(); err != nil {
 		c.log.Error("taking the VIP down failed", "err", err)
 	}
@@ -405,6 +442,7 @@ func (c *Controller) HandOff(ctx context.Context) error {
 		msg, err := c.send(ctx, p, blob.Bytes())
 		if err == nil {
 			c.forwardRelays(p)
+			c.handedOff(p)
 			c.active.Store(false)
 			c.stats.HandoffsOut++
 			c.stats.LastHandoff = "out to " + p.name
@@ -418,6 +456,7 @@ func (c *Controller) HandOff(ctx context.Context) error {
 		var delivered *deliveredErr
 		if c.tookOver(err, p) {
 			c.forwardRelays(p)
+			c.handedOff(p)
 			c.active.Store(false)
 			c.log.Warn("handoff reply lost but the standby took the lease; treating it as done", "to", p.name, "err", err)
 			go c.setLabel(context.Background(), false)
@@ -441,6 +480,27 @@ func (c *Controller) rollback(h *gateway.Handoff, start time.Time, cause error) 
 	probeAll(conns)
 	c.log.Error("handoff failed; players restored here", "players", restored, "of", h.Players(), "took", time.Since(start).Round(time.Millisecond), "err", cause)
 	return cause
+}
+
+// handedOff records a handoff to p: the lease goes to p now (p takes it
+// too), and this gateway leaves it alone for two lease periods.
+func (c *Controller) handedOff(p peer) {
+	c.handedTo = p.name
+	c.cooldown = time.Now().Add(2 * c.cfg.LeaseDuration)
+	c.peerIP = map[string]string{p.name: p.ip}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		l, err := c.leases().Get(ctx, c.cfg.Lease, metav1.GetOptions{})
+		if err != nil || holder(l) != c.cfg.Identity {
+			return
+		}
+		id := p.name
+		t := metav1.NewMicroTime(time.Now())
+		l.Spec.HolderIdentity = &id
+		l.Spec.RenewTime = &t
+		c.leases().Update(ctx, l, metav1.UpdateOptions{})
+	}()
 }
 
 // tookOver: the standby got the handoff and holds the lease, though its
