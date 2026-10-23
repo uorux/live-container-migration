@@ -14,7 +14,8 @@ OUT = "deploy/homelab/minecraft"
 # name, request/limit (GiB), PVC size, whitelist key, ops key, modded (CPU request 2) or not (1).
 # Memory: the plan's rule (Xmx + 2 GiB modded, + 1 GiB Fabric/Paper; limit + 1 GiB), checked
 # against the image agent's measured RSS at boot (atm9 8.3, atm10 7.2, evolution 5.5, skies2 4.6,
-# integratedmc 5.0, ob2 3.5, sb4 4.4 GiB). PVC sizes are the plan's minimums: measure `du` of
+# integratedmc 5.0, ob2 3.5, sb4 4.4-4.5 GiB; sb4 raised to 7 on the image agent's advice: its heap
+# wasn't full yet). PVC sizes are the plan's minimums: measure `du` of
 # /mc/<pack> on recusant before the cutover and raise any that don't fit 2x.
 PACKS = [
     # name            req lim  pvc  whitelist      ops               modded
@@ -23,7 +24,7 @@ PACKS = [
     ("bettermc",      12, 13,  30, "bmc.json",     "ops-bmc.json",    True),
     ("evolution",     10, 11,  20, "backend.json", "ops-global.json", True),
     ("ob2",            8,  9,  20, "backend.json", "ops-global.json", True),
-    ("sb4",            5,  6,  15, "backend.json", "ops-global.json", True),
+    ("sb4",            6,  7,  15, "backend.json", "ops-global.json", True),
     ("skies2",        10, 11,  20, "backend.json", "ops-global.json", True),
     ("p2haustian",     5,  6,  15, "backend.json", "ops-global.json", False),
     ("dungeonheroes",  5,  6,  15, "backend.json", "ops-global.json", False),
@@ -31,6 +32,22 @@ PACKS = [
     ("abyssalascent", 10, 11,  20, "backend.json", "ops-global.json", True),
     ("sdfs",           7,  8,  30, "global.json",  "ops-global.json", False),
 ]
+
+# Menu display names (from the image agent); the gateways take them as -label / LCM_LABELS, printed
+# by this script for deploy/homelab/minecraft-gw and deploy/standalone/gateway.env.example.
+LABELS = {
+    "atm9": "All the Mods 9",
+    "atm10": "All the Mods 10",
+    "bettermc": "Better MC 5",
+    "evolution": "Evolution (FTB)",
+    "ob2": "OceanBlock 2 (FTB)",
+    "sb4": "StoneBlock 4 (FTB)",
+    "skies2": "FTB Skies 2",
+    "p2haustian": "Prominence II: Hasturian Era",
+    "dungeonheroes": "Dungeon Heroes",
+    "integratedmc": "Integrated MC",
+    "abyssalascent": "Abyssal Ascent",
+}
 
 # Every gateway the relays keep a session with: the in-cluster VIP gateways (one Service; standbys
 # forward) and each VPS ingress box's tailnet address, port 7000 (deploy/standalone). Add the boxes
@@ -100,7 +117,8 @@ def livepod(name, req, lim, wl, ops, modded, image):
                         {"name": "data", "persistentVolumeClaim": {"claimName": f"{name}-data"}},
                         {"name": "lcm-bin", "emptyDir": {}},
                         {"name": "secret", "secret": {"secretName": "lcm-tunnel"}},
-                        # mc-start copies these over /data/{whitelist,ops}.json at every start.
+                        # mc-start copies these over /data/{whitelist,ops}.json at every start, so the
+                        # Secret is the source of truth: in-game /whitelist and /op last until a restart.
                         {"name": "lists", "secret": {"secretName": "mc-whitelist", "items": [
                             {"key": wl, "path": "whitelist.json"},
                             {"key": ops, "path": "ops.json"},
@@ -287,6 +305,7 @@ def main():
     dump("netpol.yaml", [NETPOL], "# Not applied yet (see kustomization.yaml).\n")
     with open(os.path.join(OUT, "kustomization.yaml"), "w") as f:
         f.write(HEADER + KUSTOMIZATION)
+    print("gateway labels: " + ",".join(f"{k}={v}" for k, v in LABELS.items()))
     req = sum(p[1] for p in PACKS)
     print(f"{len(PACKS)} packs, {req} GiB requested if all awake; missing digests: {', '.join(missing) or 'none'}")
 

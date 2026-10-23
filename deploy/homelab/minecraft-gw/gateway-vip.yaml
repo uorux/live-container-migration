@@ -63,6 +63,7 @@ spec:
         - -backends=atm9,atm10,bettermc,evolution,ob2,sb4,skies2,p2haustian,dungeonheroes,integratedmc,abyssalascent
         - -menu
         - -menu-title=rooty.dev Minecraft
+        - "-label=atm9=All the Mods 9,atm10=All the Mods 10,bettermc=Better MC 5,evolution=Evolution (FTB),ob2=OceanBlock 2 (FTB),sb4=StoneBlock 4 (FTB),skies2=FTB Skies 2,p2haustian=Prominence II: Hasturian Era,dungeonheroes=Dungeon Heroes,integratedmc=Integrated MC,abyssalascent=Abyssal Ascent"
         - -motd={backend} is starting, hang tight
         # Any agent can take a wake; the one leading the LivePod controller acts (others: 503).
         - -wake-url=http://100.126.30.73:7790,http://100.103.225.29:7790,http://100.65.16.13:7790

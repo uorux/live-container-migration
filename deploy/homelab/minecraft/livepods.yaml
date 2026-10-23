@@ -854,10 +854,10 @@
             "resources": {
               "requests": {
                 "cpu": "2",
-                "memory": "5Gi"
+                "memory": "6Gi"
               },
               "limits": {
-                "memory": "6Gi"
+                "memory": "7Gi"
               }
             },
             "ports": [
