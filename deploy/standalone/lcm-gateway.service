@@ -1,0 +1,63 @@
+# lcm-gateway on a standalone ingress box (not NixOS), chained behind the local HAProxy:
+#   HAProxy :25565 --send-proxy-v2--> 127.0.0.1:25566 (this) --tunnel--> relays in k3s pods
+# Install: see README.md. Config: gateway.env (shared by every gateway) + local.env (this box).
+[Unit]
+Description=lcm-gateway: holds Minecraft players while their server live-migrates
+Documentation=https://github.com/uorux/live-container-migration/blob/main/deploy/standalone/README.md
+Wants=network-online.target
+After=network-online.target tailscaled.service
+
+[Service]
+Type=exec
+EnvironmentFile=/etc/lcm-gateway/gateway.env
+EnvironmentFile=/etc/lcm-gateway/local.env
+# Secrets, encrypted at rest (systemd >= 250; see README for plain LoadCredential=).
+LoadCredentialEncrypted=tunnel-token:/etc/credstore.encrypted/lcm-gateway.tunnel-token
+LoadCredentialEncrypted=wake-token:/etc/credstore.encrypted/lcm-gateway.wake-token
+Environment=LCM_TOKEN_FILE=%d/tunnel-token
+Environment=LCM_WAKE_TOKEN_FILE=%d/wake-token
+ExecStart=/opt/lcm-gateway/current/lcm-gateway
+Restart=always
+RestartSec=1
+TimeoutStopSec=10
+
+# No privileges needed: ports > 1024, no TCP_REPAIR (that's only -vip).
+DynamicUser=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+UMask=0077
+
+# Players come from the local HAProxy; relays, wake calls and scrapes over the tailnet only.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+IPAddressDeny=any
+IPAddressAllow=localhost 100.64.0.0/10 fd7a:115c:a1e0::/48
+
+# Each player can pin ~2x the 1 MiB window while its server is frozen.
+LimitNOFILE=65536
+MemoryHigh=768M
+MemoryMax=1G
+TasksMax=4096
+
+[Install]
+WantedBy=multi-user.target

@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Token resolves the shared tunnel secret: -token, then -token-file, then
@@ -74,3 +75,23 @@ func EnvDefault(name, def string) string {
 }
 
 var _ flag.Value = (*Size)(nil)
+
+// EnvDuration returns $name parsed as a Go duration, or def if it's unset or invalid.
+func EnvDuration(name string, def time.Duration) time.Duration {
+	if v := os.Getenv(name); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+	}
+	return def
+}
+
+// EnvInt returns $name parsed as an integer, or def if it's unset or invalid.
+func EnvInt(name string, def int) int {
+	if v := os.Getenv(name); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return def
+}

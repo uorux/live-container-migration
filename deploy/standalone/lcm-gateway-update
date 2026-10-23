@@ -1,0 +1,62 @@
+#!/bin/sh
+# lcm-gateway-update [--force] [--rollback]: install the gateway build the k3s nodes' agents
+# serve, keeping old releases for rollback. Refuses to restart (dropping players) unless --force.
+set -eu
+AGENTS="${LCM_AGENTS:-100.126.30.73 100.103.225.29 100.65.16.13}"
+BASE=/opt/lcm-gateway
+ADMIN="${LCM_ADMIN:-http://127.0.0.1:7001}"
+force=0 rollback=0
+for a in "$@"; do
+  case "$a" in --force) force=1 ;; --rollback) rollback=1 ;; *) echo "usage: $0 [--force] [--rollback]" >&2; exit 2 ;; esac
+done
+
+players() { curl -fsS -m 3 "$ADMIN/status" 2>/dev/null | grep -o '"streams": *[0-9]*' | awk -F: '{s+=$2} END {print s+0}'; }
+guard() {
+  n=$(players)
+  if [ "${n:-0}" -gt 0 ] && [ "$force" != 1 ]; then
+    echo "$n players are connected through this gateway; a restart drops them. Re-run with --force." >&2
+    exit 1
+  fi
+}
+
+mkdir -p "$BASE/releases"
+if [ "$rollback" = 1 ]; then
+  cur=$(readlink "$BASE/current" 2>/dev/null || true)
+  prev=$(ls -1t "$BASE/releases" | while read -r r; do [ "releases/$r" != "$cur" ] && echo "$r" && break; done)
+  [ -n "$prev" ] || { echo "no earlier release" >&2; exit 1; }
+  guard
+  ln -sfn "releases/$prev" "$BASE/current.new" && mv -T "$BASE/current.new" "$BASE/current"
+  systemctl restart lcm-gateway
+  echo "rolled back to $prev"; exit 0
+fi
+
+# Every reachable agent must report the same version (a node rollout in progress otherwise).
+versions=""
+for ip in $AGENTS; do
+  v=$(curl -fsS -m 5 "http://$ip:7790/metrics" 2>/dev/null | sed -n 's/^lcm_agent_build_info{version="\([^"]*\)".*/\1/p' | head -1)
+  [ -n "$v" ] && versions="$versions $v" && src=$ip
+done
+want=$(echo $versions | tr ' ' '\n' | sort -u)
+[ -n "$want" ] || { echo "no agent reachable" >&2; exit 1; }
+[ "$(echo "$want" | wc -l)" = 1 ] || { echo "agents disagree on the version ($want): wait for the rollout" >&2; exit 1; }
+
+dir="$BASE/releases/$want"
+if [ ! -x "$dir/lcm-gateway" ]; then
+  mkdir -p "$dir.tmp"
+  curl -fsS -m 60 -o "$dir.tmp/lcm-gateway" "http://$src:7790/v1/bin/lcm-gateway"
+  chmod 0755 "$dir.tmp/lcm-gateway"
+  got=$("$dir.tmp/lcm-gateway" -version)
+  [ "$got" = "$want" ] || { echo "downloaded binary says $got, agents say $want" >&2; rm -rf "$dir.tmp"; exit 1; }
+  sha256sum "$dir.tmp/lcm-gateway" > "$dir.tmp/SHA256"
+  mv "$dir.tmp" "$dir"
+fi
+if [ "$(readlink "$BASE/current" 2>/dev/null)" = "releases/$want" ]; then
+  echo "already on $want"; exit 0
+fi
+guard
+ln -sfn "releases/$want" "$BASE/current.new" && mv -T "$BASE/current.new" "$BASE/current"
+systemctl restart lcm-gateway
+sleep 2
+curl -fsS -m 3 "$ADMIN/healthz" >/dev/null && echo "now on $want" || { echo "not healthy after the restart: $0 --rollback" >&2; exit 1; }
+# Keep the newest three releases.
+ls -1t "$BASE/releases" | tail -n +4 | while read -r r; do [ "releases/$r" != "$(readlink "$BASE/current")" ] && rm -rf "$BASE/releases/$r"; done
