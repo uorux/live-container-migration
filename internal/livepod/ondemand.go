@@ -34,6 +34,9 @@ import (
 type onDemand struct {
 	backend   string
 	idleAfter time.Duration
+	// startAsleep: a new LivePod starts asleep (no pod until the first wake),
+	// so applying many on-demand servers at once doesn't boot them all.
+	startAsleep bool
 }
 
 func onDemandSpec(lp *unstructured.Unstructured) (onDemand, bool) {
@@ -50,7 +53,14 @@ func onDemandSpec(lp *unstructured.Unstructured) (onDemand, bool) {
 			od.idleAfter = d
 		}
 	}
+	od.startAsleep, _ = m["startAsleep"].(bool)
 	return od, true
+}
+
+// statusNew reports whether the controller has never written this LivePod's status.
+func statusNew(lp *unstructured.Unstructured) bool {
+	p, _, _ := unstructured.NestedString(lp.Object, "status", "phase")
+	return p == ""
 }
 
 func statusAsleep(lp *unstructured.Unstructured) bool {

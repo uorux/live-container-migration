@@ -15,19 +15,41 @@ spec:
       annotations:
         summary: "Live migration failed after the source stopped ({{ $labels.instance }})"
         description: "A migration stopped its source but the workload was neither restored nor rolled back. The workload may be down. Run `lcm history` for the error and image location, and `lcm recover` to restore it."
-    - alert: LcmGatewayBackendDown
-      expr: lcm_gateway_tunnel_down_seconds > 180
+    - alert: LcmGatewayPlayersWaiting
+      # Players held at the gateway for 4+ minutes while their server is down: it isn't
+      # starting (on-demand wake failed, or a crash). -hold-max (default 5 min) kicks them next.
+      expr: (lcm_gateway_held_players > 0) and on(instance, backend) (lcm_gateway_tunnel_down_seconds > 240)
       labels: {severity: critical}
       annotations:
-        summary: "lcm-gateway {{ $labels.namespace }}/{{ $labels.backend }} has had no server for {{ $value | humanizeDuration }}"
-        description: "No relay has connected to the gateway for over 3 minutes. Players are held or see 'starting'. Check the workload pod in {{ $labels.namespace }}."
+        summary: "Players waiting on {{ $labels.backend }} for {{ $value }}+ s ({{ $labels.instance }})"
+        description: "{{ $labels.backend }} has had no server for 4+ minutes while players are held. Check its LivePod (phase, events) and the wake path (lcm_gateway_wakes_total)."
+    - alert: LcmGatewayBackendDown
+      # A backend with no server for 10 minutes that is not an asleep on-demand LivePod (the
+      # LivePod name must equal the backend name for that check), counted only on the gateway
+      # serving the VIP, not on standbys (which never hold relays themselves).
+      expr: |
+        (lcm_gateway_tunnel_down_seconds > 600)
+          unless on(instance) (lcm_gateway_vip_active == 0)
+          unless on(backend) label_replace(lcm_livepod_running{phase=~"Asleep|Sleeping|Waking"}, "backend", "$1", "livepod", "(.+)")
+      labels: {severity: critical}
+      annotations:
+        summary: "{{ $labels.backend }} has had no server for {{ $value | humanizeDuration }} ({{ $labels.instance }})"
+        description: "No relay has connected for over 10 minutes and the backend isn't asleep. Players are held or see 'starting'. Check the server's pod."
     - alert: LcmGatewayDown
       expr: up{job=~".*lcm-gateway.*"} == 0
       for: 5m
       labels: {severity: critical}
       annotations:
-        summary: "lcm-gateway {{ $labels.namespace }} is not being scraped"
-        description: "The gateway holds all player connections. If it is down, players are disconnected."
+        summary: "lcm-gateway {{ $labels.instance }} ({{ $labels.job }}) is not being scraped"
+        description: "The gateway holds its players' connections. If it is down, they are disconnected."
+    - alert: LcmVIPUnserved
+      # Exactly one VIP gateway should be active.
+      expr: sum(lcm_gateway_vip_active) != 1
+      for: 1m
+      labels: {severity: critical}
+      annotations:
+        summary: "{{ $value }} gateways serve the router-path VIP (want 1)"
+        description: "0: router players can't connect (lease not taken: check the lcm-gateway -vip pods). 2: two nodes answer for the VIP (a hung gateway; see docs/router-path.md)."
     - alert: LcmAgentDown
       expr: up{job="lcm-agent"} == 0
       for: 5m

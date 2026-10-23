@@ -829,6 +829,77 @@ data:
             "overrides": []
           },
           "options": {}
+        },
+        {
+          "type": "state-timeline",
+          "title": "Router-path VIP: serving gateway",
+          "description": "Which lcm-gateway -vip instance serves the VIP (1). Exactly one at a time; see docs/router-path.md.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 60,
+            "w": 12,
+            "h": 7
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "max by (instance) (lcm_gateway_vip_active)",
+              "legendFormat": "{{instance}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {},
+            "overrides": []
+          },
+          "options": {}
+        },
+        {
+          "type": "timeseries",
+          "title": "VIP handoffs",
+          "description": "Handoffs of the VIP with its players' connections (node drain, gateway upgrade). rolled_back: no standby took it and the old gateway restored everything. The player-visible pause adds the relay's reconnect (~0.1 s).",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 12,
+            "y": 60,
+            "w": 12,
+            "h": 7
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum by (direction, result) (increase(lcm_gateway_vip_handoffs_total[$__rate_interval]))",
+              "legendFormat": "{{direction}} {{result}}",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "histogram_quantile(0.9, sum by (le) (rate(lcm_gateway_vip_handoff_seconds_bucket{direction=\"out\"}[$__rate_interval])))",
+              "legendFormat": "p90 seconds (out)",
+              "refId": "B"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {},
+            "overrides": []
+          },
+          "options": {}
         }
       ],
       "description": "uorux/live-container-migration \u2014 runbook: docs/operations.md"

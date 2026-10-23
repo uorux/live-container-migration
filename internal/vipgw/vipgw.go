@@ -40,6 +40,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"lcm/internal/gateway"
+	"lcm/internal/metrics"
 	"lcm/internal/tcprepair"
 	"lcm/internal/vip"
 )
@@ -83,6 +84,9 @@ type Controller struct {
 	// gateway for a moment; it must not take that as its own until then.
 	handedTo string
 	cooldown time.Time
+
+	handoffs   *metrics.Counter
+	handoffDur *metrics.Histogram
 }
 
 // Stats are reported on the admin endpoint.
@@ -107,7 +111,32 @@ func New(cfg Config) *Controller {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
-	return &Controller{cfg: cfg, log: cfg.Logger.With("vip", cfg.NS.Prefix().Addr().String())}
+	c := &Controller{cfg: cfg, log: cfg.Logger.With("vip", cfg.NS.Prefix().Addr().String())}
+	if reg := cfg.Gateway.Metrics(); reg != nil {
+		reg.GaugeFunc("lcm_gateway_vip_active", "1 while this gateway serves the VIP, 0 on a standby.", nil, func() []metrics.Sample {
+			v := 0.0
+			if c.active.Load() {
+				v = 1
+			}
+			return []metrics.Sample{{Value: v}}
+		})
+		c.handoffs = reg.Counter("lcm_gateway_vip_handoffs_total",
+			"VIP handoffs: direction out|in, result ok|rolled_back|failed.", "direction", "result")
+		c.handoffDur = reg.Histogram("lcm_gateway_vip_handoff_seconds",
+			"Time from taking the VIP down to the standby confirming (out) or to the VIP up (in).",
+			[]float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5}, "direction")
+	}
+	return c
+}
+
+func (c *Controller) countHandoff(direction, result string, d time.Duration) {
+	if c.handoffs == nil {
+		return
+	}
+	c.handoffs.Inc(direction, result)
+	if result == "ok" {
+		c.handoffDur.Observe(d.Seconds(), direction)
+	}
 }
 
 // Active reports whether this gateway serves the VIP now.
@@ -450,6 +479,7 @@ func (c *Controller) HandOff(ctx context.Context) error {
 			c.stats.LastDuration = time.Since(start).Round(time.Millisecond).String()
 			c.stats.Since = time.Now()
 			c.log.Info("handed off", "to", p.name, "players", h.Players(), "took", time.Since(start).Round(time.Millisecond), "peer", msg)
+			c.countHandoff("out", "ok", time.Since(start))
 			go c.setLabel(context.Background(), false)
 			return nil
 		}
@@ -459,6 +489,7 @@ func (c *Controller) HandOff(ctx context.Context) error {
 			c.handedOff(p)
 			c.active.Store(false)
 			c.log.Warn("handoff reply lost but the standby took the lease; treating it as done", "to", p.name, "err", err)
+			c.countHandoff("out", "ok", time.Since(start))
 			go c.setLabel(context.Background(), false)
 			return nil
 		}
@@ -472,6 +503,7 @@ func (c *Controller) HandOff(ctx context.Context) error {
 
 // rollback restores a frozen handoff here and brings the VIP back.
 func (c *Controller) rollback(h *gateway.Handoff, start time.Time, cause error) error {
+	c.countHandoff("out", "rolled_back", 0)
 	c.cfg.Gateway.ForwardTunnels("")
 	conns, restored := c.restoreAll(h)
 	if err := c.cfg.NS.Up(); err != nil {
@@ -639,6 +671,7 @@ func (c *Controller) serveHandoff(conn net.Conn) {
 	if err := c.cfg.NS.Up(); err != nil {
 		c.mu.Unlock()
 		c.log.Error("VIP up after a handoff in failed", "err", err)
+		c.countHandoff("in", "failed", 0)
 		reply(conn, false, "VIP up: "+err.Error())
 		return
 	}
@@ -650,6 +683,7 @@ func (c *Controller) serveHandoff(conn net.Conn) {
 	c.stats.LastPlayers = restored
 	c.stats.LastDuration = time.Since(start).Round(time.Millisecond).String()
 	c.stats.Since = time.Now()
+	c.countHandoff("in", "ok", time.Since(start))
 	c.mu.Unlock()
 	reply(conn, true, fmt.Sprintf("%d of %d players restored in %v", restored, h.Players(), time.Since(start).Round(time.Millisecond)))
 	c.log.Info("took a handoff", "from", string(from), "players", restored, "of", h.Players(), "took", time.Since(start).Round(time.Millisecond))

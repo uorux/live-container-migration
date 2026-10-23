@@ -207,3 +207,29 @@ func TestOnDemandNotStoppedDuringMigration(t *testing.T) {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+func TestOnDemandStartAsleep(t *testing.T) {
+	ctx := context.Background()
+	players := 0
+	c, kc := setupOnDemand(&players)
+	lp, _ := c.Dyn.Resource(GVR).Namespace("ns").Get(ctx, "fab", metav1.GetOptions{})
+	unstructured.SetNestedField(lp.Object, true, "spec", "onDemand", "startAsleep")
+	if _, err := c.Dyn.Resource(GVR).Namespace("ns").Update(ctx, lp, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	c.reconcileAll(ctx)
+	c.reconcileAll(ctx)
+	if n := podCount(t, kc); n != 0 {
+		t.Fatalf("startAsleep LivePod got %d pods before any wake", n)
+	}
+	if st := livePodStatus(t, c); st["asleep"] != true || st["phase"] != "Asleep" {
+		t.Fatalf("status %v", st)
+	}
+	if _, err := c.Wake(ctx, "fabric"); err != nil {
+		t.Fatal(err)
+	}
+	c.reconcileAll(ctx)
+	if n := podCount(t, kc); n != 1 {
+		t.Fatalf("not started by the first wake (%d pods)", n)
+	}
+}

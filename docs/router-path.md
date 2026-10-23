@@ -71,4 +71,7 @@ or the gateway is upgraded. Players see a pause of about 0.1 s; nobody is discon
   nodes). The pod needs `NET_ADMIN` and `SYS_ADMIN` in the host network namespace.
 - **The active node can't reach its own VIP** (ipvlan doesn't hairpin to its parent), so
   anything on the nodes that probes the VIP must allow for that. Players are elsewhere.
-- **Not yet built:** metrics for the VIP controller (its state is on `/vip`), and alerts.
+- **Metrics:** `lcm_gateway_vip_active` (1 on the serving gateway),
+  `lcm_gateway_vip_handoffs_total{direction,result}` and `lcm_gateway_vip_handoff_seconds`, plus
+  `/vip` on the admin port. Alerts: `LcmVIPUnserved` (not exactly one serving), and
+  `LcmGatewayBackendDown`, which ignores standbys and asleep LivePods.

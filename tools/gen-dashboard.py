@@ -94,6 +94,12 @@ panel("timeseries", "Server menu", [('sum by (result) (increase(lcm_gateway_menu
 panel("timeseries", "Menu transfers by server", [('sum by (backend) (increase(lcm_gateway_menu_transfers_total[$__rate_interval]))', "{{backend}}")], 12, 12,
       desc="Players the menu sent to each server.")
 nextrow()
+panel("state-timeline", "Router-path VIP: serving gateway", [('max by (instance) (lcm_gateway_vip_active)', "{{instance}}")], 0, 12,
+      desc="Which lcm-gateway -vip instance serves the VIP (1). Exactly one at a time; see docs/router-path.md.")
+panel("timeseries", "VIP handoffs", [('sum by (direction, result) (increase(lcm_gateway_vip_handoffs_total[$__rate_interval]))', "{{direction}} {{result}}"),
+                                    ('histogram_quantile(0.9, sum by (le) (rate(lcm_gateway_vip_handoff_seconds_bucket{direction="out"}[$__rate_interval])))', "p90 seconds (out)")], 12, 12,
+      desc="Handoffs of the VIP with its players' connections (node drain, gateway upgrade). rolled_back: no standby took it and the old gateway restored everything. The player-visible pause adds the relay's reconnect (~0.1 s).")
+nextrow()
 
 dash = {"title": "Live container migration", "uid": "lcm", "tags": ["lcm", "minecraft"], "timezone": "browser",
         "schemaVersion": 39, "refresh": "30s", "time": {"from": "now-24h", "to": "now"}, "panels": panels,

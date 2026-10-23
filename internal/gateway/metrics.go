@@ -192,6 +192,10 @@ func (g *Gateway) WriteMetrics(w io.Writer) {
 	g.metrics.reg.WriteText(w)
 }
 
+// Metrics returns the gateway's registry, for components that add their own
+// series to its /metrics (the VIP controller).
+func (g *Gateway) Metrics() *metrics.Registry { return g.metrics.reg }
+
 func (g *Gateway) metricsHandler() http.Handler {
 	h := g.metrics.reg.Handler()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

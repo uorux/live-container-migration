@@ -38,6 +38,7 @@ spec:
                 properties:
                   backend: {type: string, description: "gateway backend name (default: the LivePod's name)"}
                   idleAfter: {type: string, description: "Go duration, default 10m"}
+                  startAsleep: {type: boolean, description: "a new LivePod starts asleep: no pod until the first wake (so applying many at once boots none)"}
           status:
             type: object
             properties:

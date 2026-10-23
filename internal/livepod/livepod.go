@@ -202,7 +202,7 @@ func (c *Controller) reconcile(ctx context.Context, lp *unstructured.Unstructure
 	if lp.GetAnnotations()[PausedAnnotation] == "true" {
 		return c.setStatus(ctx, lp, "", "", "Paused", 0, false)
 	}
-	if onDemand && statusAsleep(lp) {
+	if onDemand && (statusAsleep(lp) || (od.startAsleep && statusNew(lp))) {
 		return c.setStatus(ctx, lp, "", "", "Asleep", 0, true)
 	}
 	// A migration's rollback deletes the dead source before creating the restore pod; it holds
