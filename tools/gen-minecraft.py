@@ -15,7 +15,7 @@ OUT = "deploy/homelab/minecraft"
 # Memory: the plan's rule (Xmx + 2 GiB modded, + 1 GiB Fabric/Paper; limit + 1 GiB), checked
 # against the image agent's measured RSS at boot (atm9 8.3, atm10 7.2, evolution 5.5, skies2 4.6,
 # integratedmc 5.0, ob2 3.5, sb4 4.4-4.5 GiB; sb4 raised to 7 on the image agent's advice: its heap
-# wasn't full yet). PVC sizes are the plan's minimums: measure `du` of
+# wasn't full yet; p2haustian to 7: 4.34 GiB RSS after boot at -Xmx4G). PVC sizes are the plan's minimums: measure `du` of
 # /mc/<pack> on recusant before the cutover and raise any that don't fit 2x.
 PACKS = [
     # name            req lim  pvc  whitelist      ops               modded
@@ -26,7 +26,7 @@ PACKS = [
     ("ob2",            8,  9,  20, "backend.json", "ops-global.json", True),
     ("sb4",            6,  7,  15, "backend.json", "ops-global.json", True),
     ("skies2",        10, 11,  20, "backend.json", "ops-global.json", True),
-    ("p2haustian",     5,  6,  15, "backend.json", "ops-global.json", False),
+    ("p2haustian",     6,  7,  15, "backend.json", "ops-global.json", False),
     ("dungeonheroes",  5,  6,  15, "backend.json", "ops-global.json", False),
     ("integratedmc",  10, 11,  20, "backend.json", "ops-global.json", True),
     ("abyssalascent", 10, 11,  20, "backend.json", "ops-global.json", True),
@@ -81,6 +81,8 @@ def livepod(name, req, lim, wl, ops, modded, image):
                 "spec": {
                     "runtimeClassName": "lcm",
                     "priorityClassName": "minecraft",
+                    # mc-start: `stop`, save (~2 s), SIGTERM to a lingering JVM after 25 s
+                    # (MC_STOP_GRACE); exit 143 then is normal.
                     "terminationGracePeriodSeconds": 180,
                     "securityContext": {
                         "runAsUser": 1000, "runAsGroup": 1000, "fsGroup": 1000,
