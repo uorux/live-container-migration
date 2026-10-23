@@ -213,6 +213,11 @@ func main() {
 	if ctrl != nil {
 		if err := <-ctrlDone; err != nil {
 			log.Error("VIP handoff at shutdown", "err", err)
+		} else if st := ctrl.Stats(); st.HandoffsOut > 0 && !st.Active {
+			// Relays reconnect here until their Service follows the new
+			// gateway's label: keep forwarding them for a moment.
+			log.Info("handed off; forwarding relays to the new gateway before exiting")
+			time.Sleep(5 * time.Second)
 		}
 	}
 	log.Info("shutting down")
