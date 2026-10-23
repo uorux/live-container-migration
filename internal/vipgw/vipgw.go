@@ -55,6 +55,9 @@ type Config struct {
 	// Selector picks the gateway pods that can take a handoff.
 	Selector    string
 	HandoffPort int
+	// TunnelPort is where gateways accept relays (the same on every node):
+	// after a handoff this gateway forwards relays to the new one's.
+	TunnelPort  int
 	ActiveLabel string
 
 	LeaseDuration time.Duration // default 10s
@@ -341,7 +344,7 @@ func (c *Controller) setLabel(ctx context.Context, active bool) {
 
 // ---- handoff out ----
 
-type peer struct{ name, addr string }
+type peer struct{ name, ip, addr string }
 
 func (c *Controller) peers(ctx context.Context) ([]peer, error) {
 	pods, err := c.cfg.Kube.CoreV1().Pods(c.cfg.Namespace).List(ctx, metav1.ListOptions{LabelSelector: c.cfg.Selector})
@@ -353,7 +356,7 @@ func (c *Controller) peers(ctx context.Context) ([]peer, error) {
 		if p.Name == c.cfg.Identity || p.DeletionTimestamp != nil || p.Status.PodIP == "" || !podReady(&p) {
 			continue
 		}
-		out = append(out, peer{p.Name, net.JoinHostPort(p.Status.PodIP, strconv.Itoa(c.cfg.HandoffPort))})
+		out = append(out, peer{p.Name, p.Status.PodIP, net.JoinHostPort(p.Status.PodIP, strconv.Itoa(c.cfg.HandoffPort))})
 	}
 	return out, nil
 }
@@ -400,6 +403,7 @@ func (c *Controller) HandOff(ctx context.Context) error {
 	for _, p := range peers {
 		msg, err := c.send(ctx, p, blob.Bytes())
 		if err == nil {
+			c.forwardRelays(p)
 			c.active.Store(false)
 			c.stats.HandoffsOut++
 			c.stats.LastHandoff = "out to " + p.name
@@ -411,7 +415,8 @@ func (c *Controller) HandOff(ctx context.Context) error {
 			return nil
 		}
 		var delivered *deliveredErr
-		if errors.As(err, &delivered) && c.leaseHeldBy(p.name, 3*time.Second) {
+		if c.tookOver(err, p) {
+			c.forwardRelays(p)
 			c.active.Store(false)
 			c.log.Warn("handoff reply lost but the standby took the lease; treating it as done", "to", p.name, "err", err)
 			go c.setLabel(context.Background(), false)
@@ -434,6 +439,19 @@ func (c *Controller) rollback(h *gateway.Handoff, start time.Time, cause error) 
 	probeAll(conns)
 	c.log.Error("handoff failed; players restored here", "players", restored, "of", h.Players(), "took", time.Since(start).Round(time.Millisecond), "err", cause)
 	return cause
+}
+
+// tookOver: the standby got the handoff and holds the lease, though its
+// answer was lost.
+func (c *Controller) tookOver(err error, p peer) bool {
+	var delivered *deliveredErr
+	return errors.As(err, &delivered) && c.leaseHeldBy(p.name, 3*time.Second)
+}
+
+func (c *Controller) forwardRelays(p peer) {
+	if c.cfg.TunnelPort > 0 {
+		c.cfg.Gateway.ForwardTunnels(net.JoinHostPort(p.ip, strconv.Itoa(c.cfg.TunnelPort)))
+	}
 }
 
 func (c *Controller) leaseHeldBy(name string, wait time.Duration) bool {

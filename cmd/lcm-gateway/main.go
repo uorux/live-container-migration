@@ -164,7 +164,7 @@ func main() {
 	var ctrl *vipgw.Controller
 	var pl net.Listener
 	if *vipCIDR != "" {
-		ctrl, pl, err = startVIP(g, log.With("component", "vip"), tok, *listen, *vipCIDR, *vipParent, *vipGateway, *vipLease, *vipPeers, *vipLabel, *handoffPort)
+		ctrl, pl, err = startVIP(g, log.With("component", "vip"), tok, *listen, *tunnelListen, *vipCIDR, *vipParent, *vipGateway, *vipLease, *vipPeers, *vipLabel, *handoffPort)
 	} else {
 		pl, err = gateway.Listen(ctx, *listen)
 	}
@@ -229,7 +229,7 @@ func envBool(name string) bool {
 
 // startVIP sets up the VIP namespace and its player listener, and the
 // controller that decides when this gateway serves the VIP.
-func startVIP(g *gateway.Gateway, log *slog.Logger, tok []byte, listen, cidr, parent, gw, lease, peers, label string, handoffPort int) (*vipgw.Controller, net.Listener, error) {
+func startVIP(g *gateway.Gateway, log *slog.Logger, tok []byte, listen, tunnelListen, cidr, parent, gw, lease, peers, label string, handoffPort int) (*vipgw.Controller, net.Listener, error) {
 	prefix, err := netip.ParsePrefix(cidr)
 	if err != nil {
 		return nil, nil, fmt.Errorf("-vip: %w", err)
@@ -250,6 +250,10 @@ func startVIP(g *gateway.Gateway, log *slog.Logger, tok []byte, listen, cidr, pa
 	port, err := strconv.ParseUint(portStr, 10, 16)
 	if err != nil {
 		return nil, nil, fmt.Errorf("-listen port: %w", err)
+	}
+	tport := 0
+	if _, tp, err := net.SplitHostPort(tunnelListen); err == nil {
+		tport, _ = strconv.Atoi(tp)
 	}
 	pod, podNS := os.Getenv("POD_NAME"), os.Getenv("POD_NAMESPACE")
 	if pod == "" || podNS == "" {
@@ -272,6 +276,6 @@ func startVIP(g *gateway.Gateway, log *slog.Logger, tok []byte, listen, cidr, pa
 		return nil, nil, err
 	}
 	ctrl := vipgw.New(vipgw.Config{Gateway: g, NS: ns, Token: tok, Kube: kc, Namespace: podNS, Identity: pod,
-		Lease: lease, Selector: peers, HandoffPort: handoffPort, ActiveLabel: label, Logger: log})
+		Lease: lease, Selector: peers, HandoffPort: handoffPort, TunnelPort: tport, ActiveLabel: label, Logger: log})
 	return ctrl, pl, nil
 }

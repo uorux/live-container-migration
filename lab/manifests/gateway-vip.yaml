@@ -1,0 +1,97 @@
+# The router path: lcm-gateway -vip on node2 and node3 behind 192.168.100.250 (the lab's stand-in
+# for the router's port-forward target). The active one (Lease lcm-gateway-vip) hands its players
+# to the other on SIGTERM or POST /vip/handoff. An echo server behind a relay on node1 is the
+# backend; a client on node1 (not node2/3: a node can't reach its own VIP) talks to the VIP.
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: lcm-gateway-vip}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: lcm-gateway-vip}
+rules:
+- {apiGroups: [coordination.k8s.io], resources: [leases], verbs: [get, create, update]}
+- {apiGroups: [""], resources: [pods], verbs: [get, list, patch]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: lcm-gateway-vip}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: lcm-gateway-vip}
+subjects: [{kind: ServiceAccount, name: lcm-gateway-vip}]
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata: {name: lcm-gateway-vip, labels: {app: lcm-gateway-vip}}
+spec:
+  selector: {matchLabels: {app: lcm-gateway-vip}}
+  template:
+    metadata: {labels: {app: lcm-gateway-vip}}
+    spec:
+      serviceAccountName: lcm-gateway-vip
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      terminationGracePeriodSeconds: 40
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms: [{matchExpressions: [{key: kubernetes.io/hostname, operator: In, values: [node2, node3]}]}]
+      initContainers:
+      - name: fetch
+        image: busybox:1.37
+        command: ["sh", "-c", "wget -q -O /lcm/lcm-gateway http://$HOST_IP:7790/v1/bin/lcm-gateway && chmod +x /lcm/lcm-gateway"]
+        env: [{name: HOST_IP, valueFrom: {fieldRef: {fieldPath: status.hostIP}}}]
+        volumeMounts: [{name: bin, mountPath: /lcm}]
+      containers:
+      - name: gateway
+        image: busybox:1.37
+        command: ["/lcm/lcm-gateway", "-listen", ":25565", "-tunnel-listen", ":7001", "-admin-listen", ":8081",
+                  "-token-file", "/secret/token", "-vip", "192.168.100.250/24", "-vip-parent", "eth1", "-handoff-port", "7792"]
+        env:
+        - {name: POD_NAME, valueFrom: {fieldRef: {fieldPath: metadata.name}}}
+        - {name: POD_NAMESPACE, valueFrom: {fieldRef: {fieldPath: metadata.namespace}}}
+        securityContext:
+          capabilities: {add: [NET_ADMIN, SYS_ADMIN]}
+        readinessProbe: {httpGet: {path: /healthz, port: 8081}, periodSeconds: 2}
+        volumeMounts: [{name: bin, mountPath: /lcm}, {name: secret, mountPath: /secret, readOnly: true}]
+      volumes:
+      - {name: bin, emptyDir: {}}
+      - {name: secret, secret: {secretName: lcm-tunnel}}
+---
+# Relays reach whichever gateway serves the VIP.
+apiVersion: v1
+kind: Service
+metadata: {name: lcm-gateway-vip-tunnel}
+spec:
+  selector: {app: lcm-gateway-vip, lcm.io/vip-active: "true"}
+  ports: [{name: tunnel, port: 7001, targetPort: 7001}]
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: vip-echo, labels: {app: vip-echo}}
+spec:
+  nodeName: node1
+  initContainers:
+  - name: fetch-relay
+    image: busybox:1.37
+    command: ["sh", "-c", "wget -q -O /lcm/lcm-relay http://$HOST_IP:7790/v1/bin/lcm-relay && chmod +x /lcm/lcm-relay"]
+    env: [{name: HOST_IP, valueFrom: {fieldRef: {fieldPath: status.hostIP}}}]
+    volumeMounts: [{name: lcm-bin, mountPath: /lcm}]
+  containers:
+  - name: echo
+    image: python:3.13-alpine
+    command: ["/lcm/lcm-relay", "run", "-gateway", "lcm-gateway-vip-tunnel.default.svc.cluster.local:7001", "-token-file", "/secret/token",
+              "-upstream", "127.0.0.1:9000", "-proxy-protocol=false", "--", "python3", "-u", "-c"]
+    args:
+    - |
+      import socketserver
+      class H(socketserver.BaseRequestHandler):
+          def handle(self):
+              while (d := self.request.recv(65536)): self.request.sendall(d)
+      socketserver.ThreadingTCPServer.allow_reuse_address = True
+      socketserver.ThreadingTCPServer(("127.0.0.1", 9000), H).serve_forever()
+    volumeMounts:
+    - {name: lcm-bin, mountPath: /lcm}
+    - {name: secret, mountPath: /secret, readOnly: true}
+  volumes:
+  - {name: lcm-bin, emptyDir: {}}
+  - {name: secret, secret: {secretName: lcm-tunnel}}

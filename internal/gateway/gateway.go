@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -81,6 +82,8 @@ type Gateway struct {
 	order    []string // backend names in configuration order
 	started  time.Time
 	metrics  *gwMetrics
+
+	tunnelForward atomic.Pointer[string] // see ForwardTunnels
 
 	cookieMu    sync.Mutex
 	usedCookies map[string]time.Time // menu cookie nonces already redeemed
@@ -337,8 +340,32 @@ func (g *Gateway) ServeTunnel(ln net.Listener) error {
 			time.Sleep(50 * time.Millisecond)
 			continue
 		}
+		if fwd := g.tunnelForward.Load(); fwd != nil {
+			go forwardTunnel(c, *fwd, g.log)
+			continue
+		}
 		go g.handleTunnel(c)
 	}
+}
+
+// ForwardTunnels makes the tunnel listener pass new relay connections, as
+// raw TCP, to addr: after a VIP handoff the relays reconnect here first
+// (their Service still points here for a moment) and reach the new gateway
+// without waiting for the Service to catch up.
+func (g *Gateway) ForwardTunnels(addr string) { g.tunnelForward.Store(&addr) }
+
+func forwardTunnel(c net.Conn, addr string, log *slog.Logger) {
+	defer c.Close()
+	u, err := net.DialTimeout("tcp", addr, 3*time.Second)
+	if err != nil {
+		log.Warn("forwarding a relay to the new gateway failed", "to", addr, "err", err)
+		return
+	}
+	defer u.Close()
+	done := make(chan struct{}, 2)
+	go func() { io.Copy(u, c); done <- struct{}{} }()
+	go func() { io.Copy(c, u); done <- struct{}{} }()
+	<-done
 }
 
 func (g *Gateway) handleTunnel(nc net.Conn) {
