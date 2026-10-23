@@ -105,8 +105,19 @@ in
       default = null;
       description = ''
         Optional file with a token that may only call POST /v1/wake/{backend} (waking an
-        on-demand LivePod). Give it to gateways outside the cluster (lcm-gateway -wake-url
-        -wake-token-file) instead of the agent token. Needs livePods.enable.
+        on-demand LivePod). Give it to gateways (lcm-gateway -wake-url -wake-token-file) instead
+        of the agent token. Needs livePods.enable. When unset, livePods.enable and
+        deriveTokenFromK3s are on, it is derived like the agent token (label "lcm-wake-v1") into
+        /run/lcm/wake-token, the same on every server node.
+      '';
+    };
+    livePods.wakeTokenSecrets = mkOption {
+      type = types.listOf types.str;
+      default = [ ];
+      example = [ "minecraft/lcm-wake" ];
+      description = ''
+        Secrets ("namespace/name") the leading LivePod controller keeps holding the wake token
+        (key "token"), for gateways running in the cluster. Created once the namespace exists.
       '';
     };
     logShipping.victoriaLogsUrl = mkOption {
@@ -127,7 +138,10 @@ in
     };
   };
 
-  config = mkIf cfg.enable {
+  config = mkIf cfg.enable (let
+    deriveWake = cfg.livePods.enable && cfg.deriveTokenFromK3s && cfg.wakeTokenFile == null;
+    wakeFile = if deriveWake then "/run/lcm/wake-token" else cfg.wakeTokenFile;
+  in {
     # CRIU dumps sockets via sock_diag; TCP repair needs tcp_diag.
     boot.kernelModules = [ "inet_diag" "tcp_diag" "udp_diag" "unix_diag" "netlink_diag" "packet_diag" ];
 
@@ -194,6 +208,9 @@ in
         mkdir -p "$(dirname ${cfg.tokenFile})"
         printf %s lcm-agent-v1 | openssl dgst -sha256 -hmac "$(tr -d '\n' < ${cfg.k3sTokenFile})" -r | cut -d' ' -f1 > ${cfg.tokenFile}.tmp
         mv ${cfg.tokenFile}.tmp ${cfg.tokenFile}
+      '' + lib.optionalString deriveWake ''
+        printf %s lcm-wake-v1 | openssl dgst -sha256 -hmac "$(tr -d '\n' < ${cfg.k3sTokenFile})" -r | cut -d' ' -f1 > ${wakeFile}.tmp
+        mv ${wakeFile}.tmp ${wakeFile}
       '';
     };
 
@@ -212,8 +229,10 @@ in
       } // lib.optionalAttrs cfg.livePods.enable {
         LCM_LIVEPODS = "1";
         LCM_KUBECONFIG = cfg.livePods.kubeconfig;
-      } // lib.optionalAttrs (cfg.wakeTokenFile != null) {
-        LCM_WAKE_TOKEN_FILE = cfg.wakeTokenFile;
+      } // lib.optionalAttrs (wakeFile != null) {
+        LCM_WAKE_TOKEN_FILE = wakeFile;
+      } // lib.optionalAttrs (cfg.livePods.wakeTokenSecrets != [ ]) {
+        LCM_WAKE_TOKEN_SECRETS = lib.concatStringsSep "," cfg.livePods.wakeTokenSecrets;
       };
       serviceConfig = {
         ExecStart = "${cfg.package}/bin/lcm-agent serve -listen ${cfg.listenAddress}:${toString cfg.port} -token-file ${cfg.tokenFile}";
@@ -234,5 +253,5 @@ in
     networking.firewall.extraCommands = lib.mkIf (!config.networking.nftables.enable) (lib.concatMapStrings
       (c: "iptables -w -A nixos-fw -p tcp -s ${c} --dport ${toString cfg.port} -j nixos-fw-accept\n")
       cfg.allowedCIDRs);
-  };
+  });
 }

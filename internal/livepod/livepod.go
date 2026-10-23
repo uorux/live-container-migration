@@ -50,6 +50,10 @@ type Controller struct {
 	AgentPort int
 	// Players overrides how a pod's player count is read (tests).
 	Players func(ctx context.Context, p *corev1.Pod) (int, error)
+	// WakeToken and WakeSecrets: the leader keeps the wake token in these
+	// Secrets ("namespace/name", key "token") for gateways in the cluster.
+	WakeToken   string
+	WakeSecrets []string
 
 	mu      sync.Mutex
 	leading bool
@@ -110,9 +114,14 @@ func (c *Controller) loop(ctx context.Context) {
 	if interval == 0 {
 		interval = 5 * time.Second
 	}
+	var lastSecrets time.Time
 	for {
 		if err := c.reconcileAll(ctx); err != nil {
 			c.Log.Warn("livepod reconcile", "err", err)
+		}
+		if time.Since(lastSecrets) >= wakeSecretEvery {
+			c.syncWakeSecrets(ctx)
+			lastSecrets = time.Now()
 		}
 		select {
 		case <-ctx.Done():

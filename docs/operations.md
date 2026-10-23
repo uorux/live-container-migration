@@ -60,6 +60,11 @@ forwards uncompressed to an old source.
 - **On demand:** `spec.onDemand` on the LivePod plus `-wake-url`/`-wake-token-file` on the
   gateways; see [on-demand.md](on-demand.md) "Wake and idle stop". Give the pod a
   `terminationGracePeriodSeconds` longer than the world save.
+  The wake token needs no distribution: with `livePods.enable` (and the default
+  `deriveTokenFromK3s`) every node derives it from the k3s token into `/run/lcm/wake-token`, and
+  `services.lcm.livePods.wakeTokenSecrets = [ "ns/name" ]` makes the leading controller keep it
+  in those Secrets (key `token`) for gateways in the cluster. Gateways outside the cluster get
+  a copy of `/run/lcm/wake-token` once.
 
 ## Quick look
 

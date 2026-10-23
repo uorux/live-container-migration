@@ -24,6 +24,8 @@ in
       # Only the k3s server (node1) has the admin kubeconfig the LivePod controller uses.
       livePods.enable = cfg.role == "server";
       wakeTokenFile = "/etc/lcm/wake-token";
+      # The leading controller keeps this Secret holding the wake token (lab gateways can mount it).
+      livePods.wakeTokenSecrets = [ "default/lcm-wake" ];
     };
     environment.etc."lcm/token".text = "lab-token-not-secret"; # lab only: lands in the store
     environment.etc."lcm/wake-token".text = "lab-wake-token-not-secret";

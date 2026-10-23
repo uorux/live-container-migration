@@ -40,6 +40,7 @@ func main() {
 	livePods := fs.Bool("livepods", os.Getenv("LCM_LIVEPODS") == "1", "run the LivePod controller (leader-elected across agents)")
 	kubeconfig := fs.String("kubeconfig", os.Getenv("LCM_KUBECONFIG"), "kubeconfig for the LivePod controller")
 	wakeTokenFile := fs.String("wake-token-file", os.Getenv("LCM_WAKE_TOKEN_FILE"), "optional token that may only call POST /v1/wake (for gateways outside the cluster)")
+	wakeSecrets := fs.String("wake-token-secrets", os.Getenv("LCM_WAKE_TOKEN_SECRETS"), "comma-separated namespace/name Secrets the LivePod controller keeps holding the wake token (key \"token\"), for gateways in the cluster")
 	binDir := fs.String("bin-dir", os.Getenv("LCM_BIN_DIR"), "directory with lcm-relay/lcm-gateway to serve to init containers")
 	fs.Parse(os.Args[2:])
 
@@ -81,7 +82,12 @@ func main() {
 			os.Exit(1)
 		}
 		lc := &livepod.Controller{Kube: kubernetes.NewForConfigOrDie(cfg), Dyn: dynamic.NewForConfigOrDie(cfg), Log: log,
-			Token: token, AgentPort: listenPort(*listen)}
+			Token: token, AgentPort: listenPort(*listen), WakeToken: wakeToken}
+		for _, ref := range strings.Split(*wakeSecrets, ",") {
+			if ref = strings.TrimSpace(ref); ref != "" {
+				lc.WakeSecrets = append(lc.WakeSecrets, ref)
+			}
+		}
 		go lc.Run(context.Background(), livepod.Identity())
 		a.SetWake(wakeToken, lc.Wake)
 		reg := a.Metrics()
