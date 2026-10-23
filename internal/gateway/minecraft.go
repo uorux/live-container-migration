@@ -100,7 +100,7 @@ func (g *Gateway) handleMinecraft(c net.Conn, b *Backend) {
 			c.SetReadDeadline(time.Now().Add(mc.SniffTimeout))
 		}
 		if mcproto.IsLegacyPing(rd.Raw()) {
-			if b.Session.Connected() {
+			if b.Session().Connected() {
 				g.addStream(b, &replayConn{Conn: c, prefix: rd.Raw()}, "legacy-status", log)
 				return
 			}
@@ -143,7 +143,7 @@ func (g *Gateway) handleMinecraft(c net.Conn, b *Backend) {
 		return
 	}
 	if hs.Intent == mcproto.IntentStatus {
-		if b.Session.Connected() {
+		if b.Session().Connected() {
 			c.SetReadDeadline(time.Time{})
 			g.addStream(b, &replayConn{Conn: c, prefix: rd.Raw()}, "status", log)
 			return
@@ -306,6 +306,19 @@ func (r *replayConn) SetLinger(sec int) error {
 
 var _ tunnel.TCPLike = (*replayConn)(nil)
 
+// HandoffConn: movable once the sniffed prefix has been passed on (only the
+// stream's reader touches prefix, and Freeze has stopped it).
+func (r *replayConn) HandoffConn() (*net.TCPConn, bool) {
+	if len(r.prefix) > 0 {
+		return nil, false
+	}
+	if h, ok := r.Conn.(tunnel.Handoffer); ok {
+		return h.HandoffConn()
+	}
+	tc, ok := r.Conn.(*net.TCPConn)
+	return tc, ok
+}
+
 const (
 	holdHolding int32 = iota // no server byte yet: injection allowed
 	holdStarted              // the server owns the socket; never inject again
@@ -332,6 +345,15 @@ func newHoldConn(c net.Conn, prefix []byte) *holdConn {
 }
 
 func (h *holdConn) release() { h.relOnce.Do(func() { close(h.released) }) }
+
+// HandoffConn: a login is movable once the server owns the socket; a held
+// one (keepalives injected by this gateway, server not up yet) is not.
+func (h *holdConn) HandoffConn() (*net.TCPConn, bool) {
+	if h.state.Load() != holdStarted {
+		return nil, false
+	}
+	return h.replayConn.HandoffConn()
+}
 
 func (h *holdConn) Write(p []byte) (int, error) {
 	if h.state.Load() != holdStarted {

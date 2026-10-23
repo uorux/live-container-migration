@@ -58,9 +58,11 @@ type Config struct {
 
 // Backend is one Minecraft server reachable through a relay session.
 type Backend struct {
-	Name    string
-	Session *tunnel.Session
-	held    atomic.Int64 // login streams currently held (Minecraft mode)
+	Name string
+	// sess is the relay session; a VIP handoff replaces it (Import).
+	sess atomic.Pointer[tunnel.Session]
+	tc   tunnel.Config // the session's config (with this backend's observer)
+	held atomic.Int64  // login streams currently held (Minecraft mode)
 	// lastWake is when Wake was last called for this backend (unix nanos).
 	lastWake atomic.Int64
 	// statusAnswered counts status pings the gateway answered itself.
@@ -144,12 +146,14 @@ func (g *Gateway) addBackend(name string) {
 	g.metrics.initBackend(name)
 	g.mu.Lock()
 	g.order = append(g.order, name)
-	g.backends[name] = &Backend{
-		Name:    name,
-		Session: tunnel.NewSession(tunnel.RoleGateway, tc, [wire.SessionIDLen]byte{}, nil),
-	}
+	b := &Backend{Name: name, tc: tc}
+	b.sess.Store(tunnel.NewSession(tunnel.RoleGateway, tc, [wire.SessionIDLen]byte{}, nil))
+	g.backends[name] = b
 	g.mu.Unlock()
 }
+
+// Session returns the backend's current relay session.
+func (b *Backend) Session() *tunnel.Session { return b.sess.Load() }
 
 // Backend returns a backend by name (nil if unknown).
 func (g *Gateway) Backend(name string) *Backend {
@@ -163,7 +167,7 @@ func (g *Gateway) DefaultBackend() *Backend { return g.Backend(g.cfg.Backend) }
 
 func (g *Gateway) lookup(name string) *tunnel.Session {
 	if b := g.Backend(name); b != nil {
-		return b.Session
+		return b.Session()
 	}
 	return nil
 }
@@ -237,6 +241,11 @@ func (p *proxiedConn) LocalAddr() net.Addr        { return p.dst }
 
 var _ tunnel.TCPLike = (*proxiedConn)(nil)
 
+// HandoffConn: movable once nothing is left in the header reader's buffer.
+func (p *proxiedConn) HandoffConn() (*net.TCPConn, bool) {
+	return p.TCPConn, p.r.Buffered() == 0
+}
+
 func readProxyHeader(c net.Conn) (net.Conn, error) {
 	tc, ok := c.(*net.TCPConn)
 	if !ok {
@@ -259,12 +268,12 @@ func readProxyHeader(c net.Conn) (net.Conn, error) {
 // addStream hands a player connection to the backend's session.
 func (g *Gateway) addStream(b *Backend, c net.Conn, kind string, log *slog.Logger) *tunnel.Stream {
 	open := wire.Open{Src: addrPort(c.RemoteAddr()), Dst: addrPort(c.LocalAddr())}
-	st := b.Session.AddStream(c, open)
+	st := b.Session().AddStream(c, open)
 	g.metrics.conns.Inc(b.Name, resultOpened)
 	if kind == "login" || kind == "l4" {
 		g.maybeWake(b)
 	}
-	log.Info("player connected", "stream", st.ID(), "kind", kind, "tunnel_up", b.Session.Connected())
+	log.Info("player connected", "stream", st.ID(), "kind", kind, "tunnel_up", b.Session().Connected())
 	return st
 }
 
@@ -278,7 +287,7 @@ func (g *Gateway) wake(b *Backend, done func(error)) {
 	if done == nil {
 		done = func(error) {}
 	}
-	if g.cfg.Wake == nil || b.Session.Connected() {
+	if g.cfg.Wake == nil || b.Session().Connected() {
 		done(nil)
 		return
 	}
@@ -386,8 +395,8 @@ type BackendStatus struct {
 func (g *Gateway) Status(detail bool) Status {
 	st := Status{Version: g.cfg.Version, Uptime: time.Since(g.started).Round(time.Second).String()}
 	for _, b := range g.backendList() {
-		s := b.Session.Stats()
-		id := b.Session.ID()
+		s := b.Session().Stats()
+		id := b.Session().ID()
 		bst := BackendStatus{Name: b.Name, Session: hex.EncodeToString(id[:]), Connected: s.Connected,
 			DownSince: s.DownSince, Streams: s.Streams, HeldPlayers: heldPlayers(b, s), Held: b.held.Load(),
 			Connects: s.Connects, Resumes: s.Resumes, NewSessions: s.NewSessions, Disconnects: s.Disconnects,
@@ -404,7 +413,7 @@ func (g *Gateway) Status(detail bool) Status {
 			bst.LastOutage, bst.LastOutageSeconds = s.LastOutage.Round(time.Millisecond).String(), s.LastOutage.Seconds()
 		}
 		if detail {
-			bst.StreamInfo = b.Session.StreamInfos()
+			bst.StreamInfo = b.Session().StreamInfos()
 		}
 		st.Backends = append(st.Backends, bst)
 	}

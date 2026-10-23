@@ -87,7 +87,7 @@ func (g *Gateway) menuBackends() []*Backend {
 // refreshInfo pings b through its tunnel if it is connected and the last
 // result is stale. Concurrent callers share one ping.
 func (g *Gateway) refreshInfo(b *Backend, open wire.Open, protocol int32) {
-	if !b.Session.Connected() {
+	if !b.Session().Connected() {
 		return
 	}
 	if cur := b.info.Load(); cur != nil && time.Since(cur.at) < serverInfoTTL {
@@ -98,7 +98,7 @@ func (g *Gateway) refreshInfo(b *Backend, open wire.Open, protocol int32) {
 	}
 	defer b.infoBusy.Store(false)
 	local, remote := net.Pipe()
-	b.Session.AddStream(remote, open)
+	b.Session().AddStream(remote, open)
 	defer local.Close()
 	local.SetDeadline(time.Now().Add(2 * time.Second))
 	doc, err := mcproto.QueryStatus(local, protocol, b.Name, 25565)
@@ -149,7 +149,7 @@ func (g *Gateway) menuStatus(protocol int32) mcproto.StatusDoc {
 	online, up := 0, 0
 	bs := g.menuBackends()
 	for _, b := range bs {
-		if b.Session.Connected() {
+		if b.Session().Connected() {
 			up++
 			if in := b.info.Load(); in != nil {
 				online += in.online
@@ -419,7 +419,7 @@ func (m *menuSession) run(clicks <-chan string, gone <-chan struct{}) string {
 					m.showMenu(true)
 					continue
 				}
-				if b.Session.Connected() {
+				if b.Session().Connected() {
 					return m.transfer(b)
 				}
 				showing = false
@@ -461,7 +461,7 @@ func (m *menuSession) run(clicks <-chan string, gone <-chan struct{}) string {
 				return menuTimeout
 			}
 			switch {
-			case waiting != nil && waiting.Session.Connected():
+			case waiting != nil && waiting.Session().Connected():
 				return m.transfer(waiting)
 			case waiting != nil && now.Sub(waitSince) > mc.MaxHold:
 				m.log.Info("menu: server did not start in time", "backend", waiting.Name)
@@ -556,13 +556,13 @@ func (g *Gateway) menuEntry(b *Backend, protocol int32) (mcproto.Compound, strin
 	}
 	var state mcproto.Compound
 	switch {
-	case b.Session.Connected() && in != nil:
+	case b.Session().Connected() && in != nil:
 		state = mcproto.Styled(fmt.Sprintf("  %d playing", in.online), "green", false)
 		if in.protocol != protocol && in.protocol > 0 {
 			state = mcproto.Styled(fmt.Sprintf("  %d playing, %s", in.online, in.version), "yellow", false)
 			tip = append(tip, "Your Minecraft version differs from the server's")
 		}
-	case b.Session.Connected():
+	case b.Session().Connected():
 		state = mcproto.Styled("  up", "green", false)
 	case g.cfg.Wake != nil && time.Since(time.Unix(0, b.lastWake.Load())) < 2*time.Minute:
 		state = mcproto.Styled("  starting", "gold", false)

@@ -54,11 +54,11 @@ func newMCEnv(t *testing.T, mc *MinecraftConfig) *mcEnv {
 	}
 	go gw.ServePlayers(pl, gw.DefaultBackend())
 	go gw.ServeTunnel(tl)
-	t.Cleanup(func() { pl.Close(); tl.Close(); gw.DefaultBackend().Session.CloseAll() })
+	t.Cleanup(func() { pl.Close(); tl.Close(); gw.DefaultBackend().Session().CloseAll() })
 	return &mcEnv{t: t, gw: gw, playerAddr: pl.Addr().String(), tunnelAddr: tl.Addr().String()}
 }
 
-func (e *mcEnv) session() *tunnel.Session { return e.gw.DefaultBackend().Session }
+func (e *mcEnv) session() *tunnel.Session { return e.gw.DefaultBackend().Session() }
 
 func (e *mcEnv) startServer(ready bool) *mctest.Server {
 	s, err := mctest.Start(true)
@@ -436,7 +436,7 @@ func TestRouteByHostname(t *testing.T) {
 		done := make(chan struct{})
 		go func() { r.Run(ctx); close(done) }()
 		defer func() { cancel(); <-done }()
-		e.waitFor("relay "+name, func() bool { return gw.Backend(name).Session.Connected() })
+		e.waitFor("relay "+name, func() bool { return gw.Backend(name).Session().Connected() })
 	}
 	for host, want := range map[string]string{
 		"atm10.mc.example.com\x00FML3\x00": "atm10",

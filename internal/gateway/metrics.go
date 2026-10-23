@@ -121,7 +121,7 @@ func (m *gwMetrics) syncCounters(g *Gateway) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, b := range g.backendList() {
-		s := b.Session.Stats()
+		s := b.Session().Stats()
 		last := m.lastBytes[b.Name]
 		m.bytes.Add(float64(s.BytesFromLocal-last[0]), b.Name, "to_server")
 		m.bytes.Add(float64(s.BytesToLocal-last[1]), b.Name, "to_player")
@@ -180,7 +180,7 @@ func (g *Gateway) perBackend(f func(*Backend, tunnel.Stats) float64) func() []me
 	return func() []metrics.Sample {
 		var out []metrics.Sample
 		for _, b := range g.backendList() {
-			out = append(out, metrics.Sample{Labels: []string{b.Name}, Value: f(b, b.Session.Stats())})
+			out = append(out, metrics.Sample{Labels: []string{b.Name}, Value: f(b, b.Session().Stats())})
 		}
 		return out
 	}

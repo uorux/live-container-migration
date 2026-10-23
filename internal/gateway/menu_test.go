@@ -56,7 +56,7 @@ func (e *menuEnv) startBackend(name string) *mctest.Server {
 	done := make(chan struct{})
 	go func() { r.Run(ctx); close(done) }()
 	e.t.Cleanup(func() { cancel(); <-done })
-	e.waitFor("relay "+name, func() bool { return e.gw.Backend(name).Session.Connected() })
+	e.waitFor("relay "+name, func() bool { return e.gw.Backend(name).Session().Connected() })
 	return s
 }
 
