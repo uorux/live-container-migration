@@ -26,6 +26,7 @@ const (
 	resultHoldTimeout    = "hold_timeout"     // -minecraft login hold passed -hold-max
 	resultError          = "error"            // protocol error (window overrun, offset mismatch)
 	resultShutdown       = "shutdown"         // gateway shutting down
+	resultHandedOff      = "handed_off"       // moved, still open, to the gateway that took over the VIP
 )
 
 var closeResults = map[tunnel.CloseReason]string{
@@ -36,6 +37,7 @@ var closeResults = map[tunnel.CloseReason]string{
 	tunnel.CloseSessionLost: resultSessionLost,
 	tunnel.CloseProtocol:    resultError,
 	tunnel.CloseShutdown:    resultShutdown,
+	tunnel.CloseHandedOff:   resultHandedOff,
 	// tunnel.CloseAborted is counted by whoever called Stream.Reset.
 }
 

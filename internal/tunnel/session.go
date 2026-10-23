@@ -91,6 +91,8 @@ const (
 	CloseProtocol
 	// CloseShutdown: CloseAll.
 	CloseShutdown
+	// CloseHandedOff: Freeze moved the stream to another gateway.
+	CloseHandedOff
 )
 
 func (r CloseReason) String() string {
@@ -111,6 +113,8 @@ func (r CloseReason) String() string {
 		return "protocol"
 	case CloseShutdown:
 		return "shutdown"
+	case CloseHandedOff:
+		return "handed_off"
 	}
 	return fmt.Sprintf("reason(%d)", uint8(r))
 }
@@ -184,6 +188,11 @@ type Stream struct {
 	txCond sync.Cond // space in tx, or closed
 	rxCond sync.Cond // data/fin in rx, or closed
 
+	// pre is written to local before rx and outside the offsets: bytes an
+	// earlier gateway had already acknowledged but its socket never sent
+	// (a handed-off connection's unsent tail, see Import).
+	pre []byte
+
 	maxTxBuffered int
 	created       time.Time
 }
@@ -224,6 +233,11 @@ type Session struct {
 
 	stats   Stats
 	created time.Time
+
+	// frozen: the session is being handed off (Freeze): no tunnel
+	// connection, and the local pumps stop at once.
+	frozen bool
+	pumps  sync.WaitGroup // running readPump/writePump goroutines
 }
 
 // Stats are counters for status reporting and tests.
@@ -345,9 +359,14 @@ func (s *Session) AddStream(local net.Conn, open wire.Open) *Stream {
 	st.openPending = true
 	s.kick()
 	s.mu.Unlock()
+	st.startPumps()
+	return st
+}
+
+func (st *Stream) startPumps() {
+	st.s.pumps.Add(2)
 	go st.readPump()
 	go st.writePump()
-	return st
 }
 
 // ---- relay: upstream connected ----
@@ -364,8 +383,7 @@ func (st *Stream) AttachLocal(local net.Conn) bool {
 	}
 	st.local = local
 	s.mu.Unlock()
-	go st.readPump()
-	go st.writePump()
+	st.startPumps()
 	return true
 }
 
@@ -507,13 +525,14 @@ func (s *Session) maybeFinish(st *Stream) {
 
 func (st *Stream) readPump() {
 	s := st.s
+	defer s.pumps.Done()
 	buf := make([]byte, 32<<10)
 	for {
 		s.mu.Lock()
-		for !st.closed && st.localErr == "" && st.tx.Len() >= s.cfg.Window {
+		for !st.closed && !s.frozen && st.localErr == "" && st.tx.Len() >= s.cfg.Window {
 			st.txCond.Wait()
 		}
-		if st.closed || st.txFin || st.localErr != "" {
+		if st.closed || st.txFin || st.localErr != "" || s.frozen {
 			s.mu.Unlock()
 			return
 		}
@@ -538,6 +557,12 @@ func (st *Stream) readPump() {
 			}
 			s.kick()
 		}
+		if s.frozen {
+			// Freeze expired the socket's deadline: not a failure. What was
+			// read is kept; the socket itself is handed off.
+			s.mu.Unlock()
+			return
+		}
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				st.txFin = true
@@ -557,15 +582,34 @@ type closeWriter interface{ CloseWrite() error }
 
 func (st *Stream) writePump() {
 	s := st.s
+	defer s.pumps.Done()
 	buf := make([]byte, 32<<10)
 	for {
 		s.mu.Lock()
-		for !st.closed && st.localErr == "" && st.rx.Len() == 0 && !st.peerGone && !(st.rxFin && !st.finDelivered) {
+		for !st.closed && !s.frozen && st.localErr == "" && len(st.pre) == 0 && st.rx.Len() == 0 && !st.peerGone && !(st.rxFin && !st.finDelivered) {
 			st.rxCond.Wait()
 		}
-		if st.closed || st.localErr != "" {
+		if st.closed || st.localErr != "" || s.frozen {
 			s.mu.Unlock()
 			return
+		}
+		if len(st.pre) > 0 {
+			p := st.pre
+			s.mu.Unlock()
+			w, err := st.local.Write(p)
+			s.mu.Lock()
+			st.pre = st.pre[w:]
+			if st.closed || st.localErr != "" || s.frozen {
+				s.mu.Unlock()
+				return
+			}
+			if err != nil {
+				s.failLocal(st, "local write: "+err.Error())
+				s.mu.Unlock()
+				return
+			}
+			s.mu.Unlock()
+			continue
 		}
 		if st.rx.Len() == 0 {
 			if st.peerGone {
@@ -607,6 +651,10 @@ func (st *Stream) writePump() {
 			st.rxDelivered += uint64(w)
 			s.stats.BytesToLocal += uint64(w)
 			s.noteDelivered(st)
+		}
+		if s.frozen {
+			s.mu.Unlock()
+			return
 		}
 		if err != nil {
 			s.failLocal(st, "local write: "+err.Error())

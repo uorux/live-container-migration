@@ -216,6 +216,12 @@ func ServerHandshake(nc net.Conn, token []byte, timeout time.Duration, lookup Se
 	if s == nil {
 		return reject(fmt.Sprintf("unknown backend %q", h.Backend))
 	}
+	if s.isFrozen() {
+		// Being handed off: look like a gateway that went away, so the
+		// relay keeps retrying until it reaches the one taking over.
+		nc.Close()
+		return nil, errFrozen
+	}
 	c := newConn(s, nc, r)
 	ack := s.gatewayAccept(c, &h)
 	if _, err := nc.Write(wire.AppendFrame(nil, wire.THelloAck, 0, ack.Marshal(token, ch.Nonce, h.Session))); err != nil {
