@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"syscall"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -34,8 +35,8 @@ const (
 	tcpEstablished = 1
 )
 
-// window is struct tcp_repair_window.
-type window struct {
+// Window is struct tcp_repair_window.
+type Window struct {
 	SndWl1    uint32
 	SndWnd    uint32
 	MaxWindow uint32
@@ -64,7 +65,7 @@ type State struct {
 	// TSVal is the connection's current timestamp clock (TCP_TIMESTAMP), so
 	// the peer's PAWS check accepts the restored socket's segments.
 	TSVal  uint32
-	Window window
+	Window Window
 }
 
 func (s *State) String() string {
@@ -336,6 +337,30 @@ func DumpConn(c *net.TCPConn) (*State, error) {
 		return nil, err
 	}
 	return st, derr
+}
+
+// Probe makes a restored connection send a window probe now (by entering
+// and leaving repair mode), so the peer answers and the flow resumes at once
+// instead of at its next retransmission. Restore already sends one, but while
+// the address it lives on was still down (see vip) that one went nowhere.
+func Probe(c net.Conn) error {
+	sc, ok := c.(syscall.Conn)
+	if !ok {
+		return fmt.Errorf("%T has no descriptor", c)
+	}
+	rc, err := sc.SyscallConn()
+	if err != nil {
+		return err
+	}
+	var perr error
+	if err := rc.Control(func(fd uintptr) {
+		if perr = unix.SetsockoptInt(int(fd), unix.SOL_TCP, unix.TCP_REPAIR, 1); perr == nil {
+			perr = unix.SetsockoptInt(int(fd), unix.SOL_TCP, unix.TCP_REPAIR, unix.TCP_REPAIR_OFF)
+		}
+	}); err != nil {
+		return err
+	}
+	return perr
 }
 
 // Conn wraps a restored descriptor as a net.Conn (taking ownership of fd).

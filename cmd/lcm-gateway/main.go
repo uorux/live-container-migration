@@ -6,8 +6,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"log/slog"
+	"net"
 	"net/http"
 	"net/netip"
 	"os"
@@ -17,9 +20,14 @@ import (
 	"syscall"
 	"time"
 
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+
 	"lcm/internal/cliutil"
 	"lcm/internal/gateway"
 	"lcm/internal/tunnel"
+	"lcm/internal/vip"
+	"lcm/internal/vipgw"
 )
 
 // version is set at build time: -ldflags "-X main.version=...".
@@ -50,6 +58,13 @@ func main() {
 	acceptProxy := flag.String("accept-proxy", cliutil.EnvDefault("LCM_ACCEPT_PROXY", ""), "comma-separated CIDRs (e.g. 127.0.0.1/32 for a local HAProxy with send-proxy-v2) whose player connections start with a PROXY v2 header (env LCM_ACCEPT_PROXY)")
 	wakeURLs := flag.String("wake-url", cliutil.EnvDefault("LCM_WAKE_URL", ""), "lcm-agent base URLs (comma-separated, e.g. http://node:7790) to wake an on-demand backend when a player arrives and its relay isn't connected (env LCM_WAKE_URL)")
 	wakeTokenFile := flag.String("wake-token-file", cliutil.EnvDefault("LCM_WAKE_TOKEN_FILE", ""), "file with the agents' wake token (env LCM_WAKE_TOKEN_FILE)")
+	vipCIDR := flag.String("vip", cliutil.EnvDefault("LCM_VIP", ""), "serve players on this VIP (e.g. 10.0.0.250/24), in a private network namespace on -vip-parent; one gateway per node, the active one chosen by a Lease, handing its players off on SIGTERM (env LCM_VIP)")
+	vipParent := flag.String("vip-parent", cliutil.EnvDefault("LCM_VIP_PARENT", ""), "the node's LAN NIC the VIP's ipvlan sits on (-vip; env LCM_VIP_PARENT)")
+	vipGateway := flag.String("vip-gateway", cliutil.EnvDefault("LCM_VIP_GATEWAY", ""), "the LAN's default gateway, for replies to players beyond the LAN (-vip; env LCM_VIP_GATEWAY)")
+	vipLease := flag.String("vip-lease", cliutil.EnvDefault("LCM_VIP_LEASE", "lcm-gateway-vip"), "the Lease that says which gateway serves the VIP (-vip; env LCM_VIP_LEASE)")
+	vipPeers := flag.String("vip-peers", cliutil.EnvDefault("LCM_VIP_PEERS", "app=lcm-gateway-vip"), "label selector of the gateway pods that can take a handoff (-vip; env LCM_VIP_PEERS)")
+	vipLabel := flag.String("vip-active-label", cliutil.EnvDefault("LCM_VIP_ACTIVE_LABEL", "lcm.io/vip-active"), "pod label set to true on the gateway serving the VIP, for the relays' Service (-vip)")
+	handoffPort := flag.Int("handoff-port", 7792, "TCP port for handoffs between gateways (-vip)")
 	logLevel := flag.String("log-level", cliutil.EnvDefault("LCM_LOG_LEVEL", "info"), "debug|info|warn|error")
 	flag.Parse()
 
@@ -146,7 +161,13 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	pl, err := gateway.Listen(ctx, *listen)
+	var ctrl *vipgw.Controller
+	var pl net.Listener
+	if *vipCIDR != "" {
+		ctrl, pl, err = startVIP(g, log.With("component", "vip"), tok, *listen, *vipCIDR, *vipParent, *vipGateway, *vipLease, *vipPeers, *vipLabel, *handoffPort)
+	} else {
+		pl, err = gateway.Listen(ctx, *listen)
+	}
 	if err != nil {
 		log.Error("listen players", "err", err)
 		os.Exit(1)
@@ -164,18 +185,93 @@ func main() {
 			log.Error("listen admin", "err", err)
 			os.Exit(1)
 		}
-		go http.Serve(al, g.AdminHandler())
+		h := g.AdminHandler()
+		if ctrl != nil {
+			mux := http.NewServeMux()
+			mux.Handle("/", h)
+			mux.HandleFunc("GET /vip", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(ctrl.Stats())
+			})
+			mux.HandleFunc("POST /vip/handoff", func(w http.ResponseWriter, r *http.Request) {
+				if err := ctrl.HandOff(r.Context()); err != nil {
+					http.Error(w, err.Error(), http.StatusConflict)
+					return
+				}
+				w.Write([]byte("handed off\n"))
+			})
+			h = mux
+		}
+		go http.Serve(al, h)
+	}
+	ctrlDone := make(chan error, 1)
+	if ctrl != nil {
+		go func() { ctrlDone <- ctrl.Run(ctx) }()
 	}
 	log.Info("serving", "players", pl.Addr().String(), "tunnel", tl.Addr().String(), "backend", *backend, "window", int(window), "minecraft", *minecraft, "menu", *menu, "version", version)
 	<-ctx.Done()
+	if ctrl != nil {
+		if err := <-ctrlDone; err != nil {
+			log.Error("VIP handoff at shutdown", "err", err)
+		}
+	}
 	log.Info("shutting down")
 	pl.Close()
 	tl.Close()
-	g.DefaultBackend().Session.CloseAll()
+	g.DefaultBackend().Session().CloseAll()
 	time.Sleep(200 * time.Millisecond)
 }
 
 func envBool(name string) bool {
 	b, _ := strconv.ParseBool(cliutil.EnvDefault(name, "false"))
 	return b
+}
+
+// startVIP sets up the VIP namespace and its player listener, and the
+// controller that decides when this gateway serves the VIP.
+func startVIP(g *gateway.Gateway, log *slog.Logger, tok []byte, listen, cidr, parent, gw, lease, peers, label string, handoffPort int) (*vipgw.Controller, net.Listener, error) {
+	prefix, err := netip.ParsePrefix(cidr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("-vip: %w", err)
+	}
+	var gwAddr netip.Addr
+	if gw != "" {
+		if gwAddr, err = netip.ParseAddr(gw); err != nil {
+			return nil, nil, fmt.Errorf("-vip-gateway: %w", err)
+		}
+	}
+	if parent == "" {
+		return nil, nil, fmt.Errorf("-vip needs -vip-parent")
+	}
+	_, portStr, err := net.SplitHostPort(listen)
+	if err != nil {
+		return nil, nil, fmt.Errorf("-listen: %w", err)
+	}
+	port, err := strconv.ParseUint(portStr, 10, 16)
+	if err != nil {
+		return nil, nil, fmt.Errorf("-listen port: %w", err)
+	}
+	pod, podNS := os.Getenv("POD_NAME"), os.Getenv("POD_NAMESPACE")
+	if pod == "" || podNS == "" {
+		return nil, nil, fmt.Errorf("-vip needs POD_NAME and POD_NAMESPACE (downward API)")
+	}
+	rc, err := rest.InClusterConfig()
+	if err != nil {
+		return nil, nil, fmt.Errorf("kubernetes client: %w", err)
+	}
+	kc, err := kubernetes.NewForConfig(rc)
+	if err != nil {
+		return nil, nil, err
+	}
+	ns, err := vip.Create(parent, prefix, gwAddr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("VIP namespace: %w", err)
+	}
+	pl, err := ns.Listen(uint16(port))
+	if err != nil {
+		return nil, nil, err
+	}
+	ctrl := vipgw.New(vipgw.Config{Gateway: g, NS: ns, Token: tok, Kube: kc, Namespace: podNS, Identity: pod,
+		Lease: lease, Selector: peers, HandoffPort: handoffPort, ActiveLabel: label, Logger: log})
+	return ctrl, pl, nil
 }
