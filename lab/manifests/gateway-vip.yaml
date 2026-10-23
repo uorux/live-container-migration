@@ -1,7 +1,7 @@
 # The router path: lcm-gateway -vip on node2 and node3 behind 192.168.100.250 (the lab's stand-in
 # for the router's port-forward target). The active one (Lease lcm-gateway-vip) hands its players
-# to the other on SIGTERM or POST /vip/handoff. An echo server behind a relay on node1 is the
-# backend; a client on node1 (not node2/3: a node can't reach its own VIP) talks to the VIP.
+# to the other on SIGTERM or POST /vip/handoff. The backend is the on-demand Fabric LivePod
+# (fabric-livepod.yaml); clients run on node1 (not node2/3: a node can't reach its own VIP).
 apiVersion: v1
 kind: ServiceAccount
 metadata: {name: lcm-gateway-vip}
@@ -44,18 +44,25 @@ spec:
       containers:
       - name: gateway
         image: busybox:1.37
+        # The production flag set: Minecraft mode, fab (on-demand LivePod) as the default backend,
+        # lobby.<anything> to "lobby", the menu for bare-IP/unknown hostnames, wake via any agent.
         command: ["/lcm/lcm-gateway", "-listen", ":25565", "-tunnel-listen", ":7001", "-admin-listen", ":8081",
-                  "-token-file", "/secret/token", "-vip", "192.168.100.250/24", "-vip-parent", "eth1", "-handoff-port", "7792"]
+                  "-token-file", "/secret/token", "-vip", "192.168.100.250/24", "-vip-parent", "eth1", "-handoff-port", "7792",
+                  "-minecraft", "-backend", "fab", "-backends", "lobby", "-motd", "{backend} is starting, hang tight",
+                  "-menu", "-menu-title", "lcm lab (VIP)", "-label", "fab=Fabric 1.21.10,lobby=Lobby (no LivePod)",
+                  "-wake-url", "http://192.168.100.11:7790,http://192.168.100.12:7790,http://192.168.100.13:7790",
+                  "-wake-token-file", "/wake/token"]
         env:
         - {name: POD_NAME, valueFrom: {fieldRef: {fieldPath: metadata.name}}}
         - {name: POD_NAMESPACE, valueFrom: {fieldRef: {fieldPath: metadata.namespace}}}
         securityContext:
           capabilities: {add: [NET_ADMIN, SYS_ADMIN]}
         readinessProbe: {httpGet: {path: /healthz, port: 8081}, periodSeconds: 2}
-        volumeMounts: [{name: bin, mountPath: /lcm}, {name: secret, mountPath: /secret, readOnly: true}]
+        volumeMounts: [{name: bin, mountPath: /lcm}, {name: secret, mountPath: /secret, readOnly: true}, {name: wake, mountPath: /wake, readOnly: true}]
       volumes:
       - {name: bin, emptyDir: {}}
       - {name: secret, secret: {secretName: lcm-tunnel}}
+      - {name: wake, secret: {secretName: lcm-wake}}   # kept by the LivePod controller (livePods.wakeTokenSecrets)
 ---
 # Relays may reach any gateway: standbys forward them to the one serving the VIP.
 apiVersion: v1
@@ -64,34 +71,3 @@ metadata: {name: lcm-gateway-vip-tunnel}
 spec:
   selector: {app: lcm-gateway-vip}
   ports: [{name: tunnel, port: 7001, targetPort: 7001}]
----
-apiVersion: v1
-kind: Pod
-metadata: {name: vip-echo, labels: {app: vip-echo}}
-spec:
-  nodeName: node1
-  initContainers:
-  - name: fetch-relay
-    image: busybox:1.37
-    command: ["sh", "-c", "wget -q -O /lcm/lcm-relay http://$HOST_IP:7790/v1/bin/lcm-relay && chmod +x /lcm/lcm-relay"]
-    env: [{name: HOST_IP, valueFrom: {fieldRef: {fieldPath: status.hostIP}}}]
-    volumeMounts: [{name: lcm-bin, mountPath: /lcm}]
-  containers:
-  - name: echo
-    image: python:3.13-alpine
-    command: ["/lcm/lcm-relay", "run", "-gateway", "lcm-gateway-vip-tunnel.default.svc.cluster.local:7001", "-token-file", "/secret/token",
-              "-upstream", "127.0.0.1:9000", "-proxy-protocol=false", "--", "python3", "-u", "-c"]
-    args:
-    - |
-      import socketserver
-      class H(socketserver.BaseRequestHandler):
-          def handle(self):
-              while (d := self.request.recv(65536)): self.request.sendall(d)
-      socketserver.ThreadingTCPServer.allow_reuse_address = True
-      socketserver.ThreadingTCPServer(("127.0.0.1", 9000), H).serve_forever()
-    volumeMounts:
-    - {name: lcm-bin, mountPath: /lcm}
-    - {name: secret, mountPath: /secret, readOnly: true}
-  volumes:
-  - {name: lcm-bin, emptyDir: {}}
-  - {name: secret, secret: {secretName: lcm-tunnel}}

@@ -13,6 +13,7 @@ const mineflayer = require('mineflayer')
 const { values: opt } = parseArgs({
   options: {
     host: { type: 'string', default: '127.0.0.1' },
+    'fake-host': { type: 'string', default: '' }, // hostname sent in the handshake (gateway routing), if not --host
     port: { type: 'string', default: '25565' },
     count: { type: 'string', default: '1' },
     prefix: { type: 'string', default: 'bot' },
@@ -34,7 +35,8 @@ const { values: opt } = parseArgs({
 if (opt.help) {
   console.error(`usage: mcbot.js --host H --port P --count N --prefix NAME --duration SECONDS
   [--version 1.21.10] [--gap-ms 500] [--probe-ms 200] [--chat-ms 10000] [--stats-ms 10000]
-  [--stagger-ms 4200] [--read-timeout-ms 30000] [--fail-gap-ms 0] [--no-move] [--no-reconnect]`)
+  [--stagger-ms 4200] [--read-timeout-ms 30000] [--fail-gap-ms 0] [--no-move] [--no-reconnect]
+  [--fake-host NAME]   hostname in the handshake (e.g. fab.lab for hostname routing)`)
   process.exit(0)
 }
 
@@ -162,6 +164,7 @@ function connect (st, isReconnect) {
     host: HOST,
     port: PORT,
     username: st.name,
+    ...(opt['fake-host'] ? { fakeHost: opt['fake-host'] } : {}),
     auth: 'offline',
     version: opt.version,
     keepAlive: false, // we answer keepalives ourselves to observe them and emulate the vanilla timeout
@@ -170,6 +173,21 @@ function connect (st, isReconnect) {
     logErrors: false
   })
   st.bot = bot
+  // Handle Login "Set Compression" the way the vanilla client does. node-minecraft-protocol
+  // enables compressed framing for any threshold, even -1 (vanilla: compression off, framing
+  // unchanged), applies only the first one (client.once), and its later updates write a property
+  // the transforms don't read. A gateway holding a login injects a no-op Set Compression
+  // (threshold -1) to keep the client alive, and the library then misreads the server's real one.
+  bot._client.removeAllListeners('compress')
+  bot._client.on('compress', (p) => {
+    const c = bot._client
+    if (!c.compressor) {
+      if (p.threshold >= 0) c.compressionThreshold = p.threshold // creates the transforms
+      return
+    }
+    c.compressor.compressionThreshold = p.threshold
+    c.decompressor.compressionThreshold = p.threshold
+  })
   st.spawned = false
   st.kickReason = null
   st.lastError = null
