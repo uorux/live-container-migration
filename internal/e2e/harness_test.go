@@ -159,7 +159,7 @@ func newHarnessCfg(t *testing.T, window int, cfg gateway.Config) *harness {
 		pl.Close()
 		tl.Close()
 		h.echo.Close()
-		h.gw.DefaultBackend().Session.CloseAll()
+		h.gw.DefaultBackend().Session().CloseAll()
 	})
 	return h
 }
@@ -193,7 +193,7 @@ func (rh *relayHandle) kill() {
 	<-rh.done
 }
 
-func (h *harness) gwStats() tunnel.Stats { return h.gw.DefaultBackend().Session.Stats() }
+func (h *harness) gwStats() tunnel.Stats { return h.gw.DefaultBackend().Session().Stats() }
 
 func (h *harness) waitFor(what string, timeout time.Duration, cond func() bool) {
 	h.t.Helper()
