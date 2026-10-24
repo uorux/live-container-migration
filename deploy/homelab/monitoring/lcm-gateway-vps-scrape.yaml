@@ -1,0 +1,18 @@
+# The VPS ingress gateways (deploy/standalone): admin port 7001 over the tailnet. Scrapes leave
+# the cluster from a node, so the tailnet ACL must allow the nodes -> boxes on tcp:7001.
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMStaticScrape
+metadata:
+  name: lcm-gateway-vps
+  namespace: monitoring
+spec:
+  jobName: lcm-gateway
+  targetEndpoints:
+  - targets: ["100.125.234.26:7001"]
+    labels: {gateway: aeon}
+    path: /metrics
+    interval: 30s
+  - targets: ["100.92.154.30:7001"]
+    labels: {gateway: type-6a}
+    path: /metrics
+    interval: 30s
