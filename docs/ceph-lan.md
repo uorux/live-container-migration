@@ -80,6 +80,55 @@
 >   secure (tailscaled already encrypts) and no LAN firewall change, gets ~139 MB/s (3.5x), but
 >   still needs the same mon IP migration as (b).
 
+> **Production after the changes (re-measured 2026-10-24 ~20:20Z).** Ceph runs msgr2 secure on host
+> networking over the LAN (mons g/h/i on v2:10.0.0.x), and Cilium routes natively over the tailnet.
+> Measured from arquitens (to munificent where it's node to node):
+>
+> | | morning | now |
+> |---|---|---|
+> | plain LAN TCP (1 / 4 streams) | 251 / 250 MB/s | 240 / 246 MB/s |
+> | TLS 1.3 over LAN | 267 / 262 MB/s | 258 / 246 MB/s |
+> | tailnet | 139 / 133 MB/s | 144 / 155 MB/s |
+> | **pod to pod across nodes** | **40 / 42 MB/s** (VXLAN) | **130 / 130 MB/s** (native) |
+> | rados 4M write t=1 | 14.7 MB/s, 271 ms | **62 MB/s, 64 ms** |
+> | rados 4M write t=16 | 26 MB/s, avg 2.3 s, max 9.9 s | **168 MB/s, avg 0.38 s, max 1.3 s** |
+> | rados 4M read t=1 / t=16 | 40 / 63 MB/s | **121 / 431 MB/s** |
+> | rados 4K write t=1 | 142 IOPS, 7.0 ms | **220 IOPS, 4.5 ms** |
+> | CephFS fio 4k randwrite fsync each | 121 IOPS | **178 IOPS** |
+> | CephFS fio 1M write, fsync at end | 24.5 MB/s | **143 MB/s** |
+> | CephFS fio 1M write, fsync each | 12.2 MB/s | **41 MB/s** |
+> | CephFS fio 1M read | 35.9 MB/s | **105 MB/s** |
+>
+> Chunk saves (same synctest: 1024 force-loaded chunks, timed `save-all flush`, fresh 5 GiB
+> CephFS volume; the evening runs were on munificent because arquitens had no CPU requests left):
+>
+> | server | `sync-chunk-writes=true` morning -> now | `false` morning -> now |
+> |---|---|---|
+> | Fabric 1.21.10 | 25.3 s -> **6.0 s** | 3.5 s -> **1.4 s** |
+> | Paper 1.21.10 | 2.6 s -> **0.9 s** | 3.0 s -> **0.9 s** |
+>
+> lcm migration (lcm-test Paper 1.21.10, ~1.4 GB, TLS LAN transport; CPU request lowered to 250m
+> so it fits on arquitens):
+>
+> | | 2026-10-23 (tailnet) | munificent -> arquitens | arquitens -> munificent |
+> |---|---|---|---|
+> | pre-copy round 1 | 3.67 GB at 55 MB/s | 1.38 GB, shipped in 5.5 s (**253 MB/s**) | 1.45 GB in 5.9 s (**248 MB/s**) |
+> | final dump / ship / restore | | 1.2 s / 0.5 s / 2.9 s | 1.1 s / 0.1 s / 1.5 s |
+> | **blackout** | 14 s | **4.7 s** | **5.0 s** |
+>
+> A first run munificent -> carrack failed at CRIU restore, in 0.03 s: `mnt-v2: Can't stat mountpoint
+> .../proc/scsi`. runc masks `/proc/scsi` only if it exists, and it exists only once `scsi_mod` is
+> loaded. On these nodes that happens whenever the `fwupd-refresh` timer first fires after boot
+> (fwupd pulls in `modprobe@sd_mod`), at a random time: 27, 54 and 59 minutes after the 12:57 boot.
+> munificent had it, so the source container carried a `/proc/scsi` mask; carrack didn't yet, and
+> a mountpoint can't be created inside procfs. lcm rolled back correctly, with an 80 s blackout.
+> The same migration retried after carrack loaded the module: **3.2 s blackout** (1.76 GB pre-copy
+> in 6.5 s, final dump 1.1 s, restore 2.0 s).
+
+> The morning `rados bench` ran from the toolbox on the pod network. The toolbox is host-networked
+> now, so it measures the LAN path the kernel clients use. The fio pod sits on the pod network, but
+> its CephFS mount is the node's kernel client, so both reach Ceph over the LAN.
+
 > **Rehearsed in the lab 2026-10-24: option (b), Ceph msgr2 secure plus host networking on the
 > LAN.** Lab Ceph mirrors production: Rook 1.20.9, ceph-csi-drivers 1.0.4, Ceph v19.2.7-20261009,
 > 3 mons, an OSD per node, CephFS with a hot standby MDS (lab/rook/). The cluster starts on the
