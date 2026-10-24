@@ -60,9 +60,8 @@ spec:
         - -vip-gateway=10.0.0.1
         - -handoff-port=7792
         - -minecraft
-        # sdfs stays on recusant for now (not migrated).
-        - -backend=atm10
-        - -backends=atm9,bettermc,evolution,ob2,sb4,skies2,p2haustian,dungeonheroes,integratedmc,abyssalascent
+        - -backend=sdfs
+        - -backends=atm9,atm10,bettermc,evolution,ob2,sb4,skies2,p2haustian,dungeonheroes,integratedmc,abyssalascent
         - -menu
         - -menu-title=rooty.dev Minecraft
         - "-label=atm9=All the Mods 9,atm10=All the Mods 10,bettermc=Better MC 5,evolution=Evolution (FTB),ob2=OceanBlock 2 (FTB),sb4=StoneBlock 4 (FTB),skies2=FTB Skies 2,p2haustian=Prominence II: Hasturian Era,dungeonheroes=Dungeon Heroes,integratedmc=Integrated MC,abyssalascent=Abyssal Ascent"
@@ -72,7 +71,7 @@ spec:
         - -wake-token-file=/wake/token
         # Only listed players (a pack's whitelist plus its ops) can wake an asleep pack; anyone else
         # gets "not white-listed" before anything starts. Running servers check for themselves.
-        - "-whitelist=*=/etc/mc/backend.json+/etc/mc/ops-global.json,bettermc=/etc/mc/bmc.json+/etc/mc/ops-bmc.json"
+        - "-whitelist=*=/etc/mc/backend.json+/etc/mc/ops-global.json,bettermc=/etc/mc/bmc.json+/etc/mc/ops-bmc.json,sdfs=/etc/mc/global.json+/etc/mc/ops-global.json"
         env:
         - {name: POD_NAME, valueFrom: {fieldRef: {fieldPath: metadata.name}}}
         - {name: POD_NAMESPACE, valueFrom: {fieldRef: {fieldPath: metadata.namespace}}}
