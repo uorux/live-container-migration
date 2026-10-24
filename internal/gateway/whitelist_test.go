@@ -190,3 +190,87 @@ func TestMenuWhitelist(t *testing.T) {
 	p.click("lcm:join/survival") // running: the server decides
 	p.transferred()
 }
+
+// The whitelist only stops unlisted players from waking an asleep server. A
+// server that is up but whose relay is briefly away (a migration's quiesce,
+// a reconnect) holds them like anyone else, without a wake; once the relay
+// says its server exited, they are refused again.
+func TestWhitelistHoldsWhileAway(t *testing.T) {
+	wl, err := ParseWhitelist("default="+writeList(t, t.TempDir(), "wl.json", `[{"name":"Alex"}]`), testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	woke := make(chan string, 8)
+	e := newEnv(t, Config{Tunnel: testTunnelCfg(), Logger: testLogger(), WakeEvery: time.Millisecond,
+		Minecraft: &MinecraftConfig{HoldInterval: testInterval, Whitelist: wl},
+		Wake:      func(_ context.Context, b string) error { woke <- b; return nil }})
+	noWake := func() {
+		t.Helper()
+		select {
+		case b := <-woke:
+			t.Fatalf("an unlisted player woke %s", b)
+		default:
+		}
+	}
+	srv := e.startServer(true)
+	r := e.startRelay(srv.Addr())
+	e.waitFor("relay connected", e.session().Connected)
+
+	e.login(774, "Mallory")
+	if l := e.nextLogin(srv); l.Name != "Mallory" {
+		t.Fatalf("server got %q", l.Name)
+	}
+
+	// A migration quiesces the relay: the server is up, just unreachable for a moment.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := r.Quiesce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	e.waitFor("tunnel down", func() bool { return !e.session().Connected() })
+	p := e.login(774, "Mallory")
+	p.keepalives(2, testInterval)
+	noWake()
+	r.Resume()
+	if l := e.nextLogin(srv); l.Name != "Mallory" {
+		t.Fatalf("server got %q", l.Name)
+	}
+
+	// The server exits (idle stop): asleep now.
+	r.Shutdown(time.Second)
+	e.waitFor("tunnel down", func() bool { return !e.session().Connected() })
+	p = e.login(774, "Mallory")
+	p.expect(mcproto.LoginDisconnect(notWhitelisted))
+	p.expectEOF()
+	noWake()
+	p = e.login(774, "Alex")
+	p.keepalives(1, testInterval)
+	select {
+	case <-woke:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a listed player didn't wake the server")
+	}
+}
+
+// A relay away longer than AwakeGrace without saying goodbye: asleep.
+func TestWhitelistAwakeGrace(t *testing.T) {
+	wl, err := ParseWhitelist("default="+writeList(t, t.TempDir(), "wl.json", `[{"name":"Alex"}]`), testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := newMCEnv(t, &MinecraftConfig{HoldInterval: testInterval, Whitelist: wl, AwakeGrace: 50 * time.Millisecond})
+	srv := e.startServer(true)
+	r := e.startRelay(srv.Addr())
+	e.waitFor("relay connected", e.session().Connected)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := r.Quiesce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if e.gw.asleep(e.gw.DefaultBackend()) {
+		t.Fatal("asleep right after the relay went away")
+	}
+	time.Sleep(100 * time.Millisecond)
+	p := e.login(774, "Mallory")
+	p.expect(mcproto.LoginDisconnect(notWhitelisted))
+}

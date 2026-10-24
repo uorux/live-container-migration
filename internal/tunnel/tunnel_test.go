@@ -3,10 +3,12 @@ package tunnel
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"math/rand/v2"
 	"net"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -163,6 +165,53 @@ func TestGatewayNewSession(t *testing.T) {
 	}
 	if s.ID() != [16]byte{2} {
 		t.Fatal("session id not adopted")
+	}
+}
+
+// TestGatewayRebind: a GOAWAY with GoAwayRebind as the first frame on a
+// connection answered NEW turns the streams opened on it back into
+// never-opened ones, which the next session (new id) keeps; anywhere else
+// the flag changes nothing.
+func TestGatewayRebind(t *testing.T) {
+	rebind := wire.Frame{Type: wire.TGoAway, Payload: wire.GoAwayPayload(wire.GoAwayRebind, "new session id")}
+	ping := wire.Frame{Type: wire.TPing, Payload: wire.PingPayload(1)}
+	for _, tc := range []struct {
+		name     string
+		resumed  bool
+		pingSent bool
+		unopened bool
+	}{
+		{"first frame after NEW", false, false, true},
+		{"after another frame", false, true, false},
+		{"on a resumed connection", true, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := NewSession(RoleGateway, testCfg(), [16]byte{}, nil)
+			if tc.resumed {
+				s.gatewayAccept(fakeConn(s), &wire.Hello{Session: [16]byte{1}, Window: 1 << 20})
+			}
+			p := addFake(s, 1, []byte("login"), 0, 0)
+			p.openPending = true
+			c := fakeConn(s)
+			s.gatewayAccept(c, &wire.Hello{Session: [16]byte{1}, Window: 1 << 20})
+			s.mu.Lock()
+			p.openPending, p.everOpened = false, true // OPEN 1 went out on c
+			s.mu.Unlock()
+			if tc.pingSent {
+				s.handleFrame(c, ping)
+			}
+			if err := s.handleFrame(c, rebind); err != errGoAway {
+				t.Fatal("GOAWAY must end the connection:", err)
+			}
+			if p.closed || p.everOpened == tc.unopened || p.openPending != tc.unopened {
+				t.Fatalf("closed %v everOpened %v openPending %v", p.closed, p.everOpened, p.openPending)
+			}
+			s.detach(c)
+			s.gatewayAccept(fakeConn(s), &wire.Hello{Session: [16]byte{2}, Window: 1 << 20})
+			if p.closed == tc.unopened {
+				t.Fatalf("on the new session: closed %v, want %v", p.closed, !tc.unopened)
+			}
+		})
 	}
 }
 
@@ -396,4 +445,79 @@ func TestResumeRandomDrops(t *testing.T) {
 		t.Fatalf("streams left: gw %d relay %d", p.gw.NumStreams(), p.rl.NumStreams())
 	}
 	p.drop()
+}
+
+// TestRelayNewIDAfterUnknownSession: a relay whose session a gateway accepted
+// before and that reaches a gateway which doesn't know it (one that restarted,
+// or took the VIP over without a handoff) never presents that id again, so a
+// gateway still holding it (the one it left, stalled) can't resume stale
+// streams. A player held at the new gateway, whose OPEN went out on the
+// connection the relay hung up, is opened again on the new session.
+func TestRelayNewIDAfterUnknownSession(t *testing.T) {
+	cfg := testCfg()
+	p := newSessionPair(t, cfg)
+	playerA, gwLocalA := tcpPair(t)
+	defer playerA.Close()
+	p.gw.AddStream(gwLocalA, wire.Open{})
+	upA := <-p.upstreams
+	defer upA.Close()
+	p.drop()
+	oldID := p.rl.ID()
+
+	// handshake runs one connection to gw, the gateway side served until it ends.
+	handshake := func(gw *Session) error {
+		a, b := tcpPair(t)
+		go func() {
+			if c, err := ServerHandshake(b, cfg.Token, time.Second, func(string) *Session { return gw }); err == nil {
+				c.Run()
+			}
+		}()
+		c, err := p.rl.ClientHandshake(a, "default")
+		if err == nil {
+			c.Close()
+		}
+		return err
+	}
+
+	gwA := p.gw
+	p.gw = NewSession(RoleGateway, cfg, [16]byte{}, nil)
+	playerB, gwLocalB := tcpPair(t)
+	defer playerB.Close()
+	p.gw.AddStream(gwLocalB, wire.Open{})
+	playerB.Write([]byte("login"))
+	if err := handshake(p.gw); !errors.Is(err, ErrNewSession) {
+		t.Fatalf("gateway B didn't know the session: got %v, want ErrNewSession", err)
+	}
+	if p.rl.ID() == oldID || p.rl.NumStreams() != 0 {
+		t.Fatalf("relay kept its id (%v) or its streams (%d)", p.rl.ID() == oldID, p.rl.NumStreams())
+	}
+	p.connect()
+	var up net.Conn
+	select {
+	case up = <-p.upstreams:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the held player was not opened on the new session")
+	}
+	defer up.Close()
+	got := make([]byte, 5)
+	up.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := io.ReadFull(up, got); err != nil || string(got) != "login" {
+		t.Fatalf("server got %q, %v", got, err)
+	}
+	if st := p.gw.Stats(); st.NewSessions != 2 || st.Streams != 1 {
+		t.Fatalf("gateway B: %d new sessions, %d streams; want 2, 1", st.NewSessions, st.Streams)
+	}
+	p.drop()
+
+	// Back at A, which still holds the old id and a stream under it: nothing is resumed.
+	if err := handshake(gwA); !errors.Is(err, ErrNewSession) {
+		t.Fatalf("gateway A: got %v, want ErrNewSession", err)
+	}
+	if st := gwA.Stats(); st.Resumes != 0 || st.Streams != 0 {
+		t.Fatalf("gateway A: %d resumes, %d streams left; want 0, 0", st.Resumes, st.Streams)
+	}
+	playerA.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := io.Copy(io.Discard, playerA); err != nil && !errors.Is(err, syscall.ECONNRESET) {
+		t.Fatalf("stale player at A: %v", err)
+	}
 }

@@ -8,6 +8,7 @@
 package tunnel
 
 import (
+	crand "crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -211,9 +212,11 @@ type Session struct {
 	cfg  Config
 	log  *slog.Logger
 
-	mu      sync.Mutex
-	id      [wire.SessionIDLen]byte
-	bound   bool // gateway: a relay has presented id
+	mu sync.Mutex
+	id [wire.SessionIDLen]byte
+	// bound: a relay has presented id (gateway); a gateway has accepted id
+	// (relay).
+	bound   bool
 	streams map[uint32]*Stream
 	order   []uint32 // ascending stream ids
 	rr      int
@@ -261,6 +264,11 @@ type Stats struct {
 	// LastOutage is the length of the most recent outage that ended in a
 	// resume (see Observer.TunnelAttached).
 	LastOutage time.Duration
+	// PeerExited (gateway): the last tunnel connection ended with the relay's
+	// FINAL GOAWAY (its server process exited). Cleared when a relay attaches.
+	PeerExited bool
+	// Bound (gateway): a relay has presented a session id; it may be away now.
+	Bound bool
 }
 
 // NewSession creates a session. For the relay, id is the session id it will
@@ -294,6 +302,7 @@ func (s *Session) Stats() Stats {
 	defer s.mu.Unlock()
 	st := s.stats
 	st.Connected = s.conn != nil
+	st.Bound = s.bound
 	st.Streams = len(s.streams)
 	for _, x := range s.streams {
 		st.TxBuffered += x.tx.Len()
@@ -698,6 +707,7 @@ func (s *Session) handleFrame(c *Conn, f wire.Frame) error {
 	if s.conn != c {
 		return errDetached
 	}
+	c.frames++
 	switch f.Type {
 	case wire.TPing:
 		c.ctrl = wire.AppendFrame(c.ctrl, wire.TPong, 0, f.Payload)
@@ -805,11 +815,15 @@ func (s *Session) handleFrame(c *Conn, f wire.Frame) error {
 		}
 		s.log.Info("peer going away", "final", flags&wire.GoAwayFinal != 0, "reason", msg)
 		if flags&wire.GoAwayFinal != 0 && s.role == RoleGateway {
+			s.stats.PeerExited = true
 			for _, id := range slices.Clone(s.order) {
 				if st := s.streams[id]; st.everOpened {
 					s.peerForgot(st)
 				}
 			}
+		}
+		if flags&wire.GoAwayRebind != 0 && s.role == RoleGateway && c.answeredNew && c.frames == 1 {
+			s.unopenLocked()
 		}
 		return errGoAway
 	default:
@@ -1028,8 +1042,35 @@ func (s *Session) gatewayAccept(c *Conn, h *wire.Hello) wire.HelloAck {
 		}
 		entries = append(entries, wire.StreamState{ID: id, RxOffset: st.rxNext, Flags: fl})
 	}
+	c.answeredNew = status == wire.AckNew
 	s.attachLocked(c, status == wire.AckResumed, outage)
 	return wire.HelloAck{Status: status, Window: uint32(s.cfg.Window), Streams: entries}
+}
+
+// unopenLocked handles a relay that hung up a connection answered with NEW
+// before processing anything on it, to come back with a new session id (see
+// Session.renewID): it never saw the OPENs sent on that connection, so those
+// streams are offered again, as never opened, on the next one. (Streams
+// opened on earlier connections were reset when this one was answered NEW.)
+// Caller holds s.mu.
+func (s *Session) unopenLocked() {
+	n := 0
+	for _, id := range slices.Clone(s.order) {
+		st := s.streams[id]
+		if !st.everOpened {
+			continue
+		}
+		if st.localErr != "" {
+			s.removeStream(st, true, CloseLocalError) // the relay does not know this stream
+			continue
+		}
+		st.everOpened, st.openPending = false, true
+		st.txNext, st.finSent = 0, false
+		n++
+	}
+	if n > 0 {
+		s.log.Info("relay is coming back with a new session id; its streams will be opened again", "streams", n)
+	}
 }
 
 // relayApply reconciles the session with the gateway's HELLO_ACK and attaches c.
@@ -1038,6 +1079,7 @@ func (s *Session) relayApply(c *Conn, a *wire.HelloAck) {
 	defer s.mu.Unlock()
 	outage := s.outageLocked()
 	s.peerWindow = uint64(a.Window)
+	s.bound = true
 	if a.Status == wire.AckNew {
 		if len(s.streams) > 0 || s.maxSeen > 0 {
 			s.log.Warn("gateway does not know this session; dropping all streams", "streams", len(s.streams))
@@ -1078,6 +1120,31 @@ func (s *Session) relayApply(c *Conn, a *wire.HelloAck) {
 	s.attachLocked(c, true, outage)
 }
 
+// renewID is the relay's answer to a gateway that does not know its session
+// (HELLO_ACK NEW) although some gateway accepted the id before: that one may
+// still hold the id with streams of its own (a gateway that lost the VIP
+// while stalled, say), and a later reconnect there must not resume them. So
+// the id is never presented again: all streams are dropped (the gateway does
+// not have them), and the session gets a new id. It reports false, changing
+// nothing, if no gateway has accepted the current id yet.
+func (s *Session) renewID() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.role != RoleRelay || !s.bound {
+		return false
+	}
+	old := s.id
+	crand.Read(s.id[:])
+	s.bound = false
+	s.log.Warn("gateway does not know this session; dropping all streams and reconnecting with a new session id",
+		"streams", len(s.streams), "old", fmt.Sprintf("%x", old), "new", fmt.Sprintf("%x", s.id))
+	for _, id := range slices.Clone(s.order) {
+		s.removeStream(s.streams[id], true, CloseSessionLost)
+	}
+	s.maxSeen = 0
+	return true
+}
+
 // outageLocked measures the outage a new connection ends (see
 // Observer.TunnelAttached). Caller holds s.mu.
 func (s *Session) outageLocked() time.Duration {
@@ -1092,6 +1159,7 @@ func (s *Session) outageLocked() time.Duration {
 
 func (s *Session) attachLocked(c *Conn, resumed bool, outage time.Duration) {
 	s.conn = c
+	s.stats.PeerExited = false
 	s.ackFlush = true
 	s.stats.Connects++
 	if resumed {

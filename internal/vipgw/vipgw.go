@@ -27,6 +27,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/netip"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -42,13 +43,21 @@ import (
 	"lcm/internal/gateway"
 	"lcm/internal/metrics"
 	"lcm/internal/tcprepair"
-	"lcm/internal/vip"
 )
+
+// NS is the network namespace the VIP lives in (a *vip.NS).
+type NS interface {
+	Prefix() netip.Prefix
+	Up() error
+	Down() error
+	Announce() error
+	Do(fn func() error) error
+}
 
 // Config configures a Controller.
 type Config struct {
 	Gateway *gateway.Gateway
-	NS      *vip.NS
+	NS      NS
 	// Token authenticates handoffs between gateways (the tunnel token).
 	Token []byte
 
@@ -74,9 +83,10 @@ type Controller struct {
 	cfg Config
 	log *slog.Logger
 
-	mu         sync.Mutex // serialises activate, stepDown, HandOff and handoffs in
-	active     atomic.Bool
-	lastRenew  time.Time
+	mu     sync.Mutex // serialises activate, stepDown, HandOff and handoffs in
+	active atomic.Bool
+	// renewed is when the lease was last renewed (or taken) by this gateway.
+	renewed    atomic.Pointer[time.Time]
 	handingOff bool
 	stats      Stats
 	peerIP     map[string]string // the lease holder's pod IP (standby)
@@ -112,6 +122,8 @@ func New(cfg Config) *Controller {
 		cfg.Logger = slog.Default()
 	}
 	c := &Controller{cfg: cfg, log: cfg.Logger.With("vip", cfg.NS.Prefix().Addr().String())}
+	c.setRenewed(time.Time{})
+	cfg.Gateway.SetGate(c.Serving)
 	if reg := cfg.Gateway.Metrics(); reg != nil {
 		reg.GaugeFunc("lcm_gateway_vip_active", "1 while this gateway serves the VIP, 0 on a standby.", nil, func() []metrics.Sample {
 			v := 0.0
@@ -141,6 +153,60 @@ func (c *Controller) countHandoff(direction, result string, d time.Duration) {
 
 // Active reports whether this gateway serves the VIP now.
 func (c *Controller) Active() bool { return c.active.Load() }
+
+func (c *Controller) setRenewed(t time.Time) { c.renewed.Store(&t) }
+
+// renewAge is how long ago the lease was last renewed. It is the longer of
+// the monotonic and the wall-clock reading: other gateways judge the lease by
+// the wall clock, and the monotonic one doesn't advance while the machine is
+// suspended.
+func (c *Controller) renewAge() time.Duration {
+	t := *c.renewed.Load()
+	return max(time.Since(t), time.Now().Round(0).Sub(t.Round(0)))
+}
+
+// leaseFresh: the lease was renewed recently enough that no other gateway can
+// have taken it. Past 2/3 of its duration this gateway lets go (see tick).
+func (c *Controller) leaseFresh() bool { return c.renewAge() <= c.cfg.LeaseDuration*2/3 }
+
+// Serving reports whether this gateway may take a new player or relay
+// connection now: it serves the VIP and holds the lease. The gateway asks
+// before serving anything (gateway.SetGate). Normally that is a cheap check
+// that the lease was renewed recently; but after a stall (the process was
+// stopped, the node froze) the lease may long have passed to another gateway,
+// and connections queued in the kernel meanwhile are accepted the moment the
+// process runs again, before the next tick notices. Then the lease is renewed
+// right here, and if that fails this gateway steps down before answering.
+func (c *Controller) Serving() bool {
+	if !c.active.Load() {
+		return false
+	}
+	if c.leaseFresh() {
+		return true
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.active.Load() {
+		return false
+	}
+	if c.leaseFresh() {
+		return true // renewed by the tick meanwhile
+	}
+	age := c.renewAge().Round(time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), c.cfg.RenewInterval)
+	defer cancel()
+	if err := c.renew(ctx); err != nil {
+		if errors.Is(err, errLost) {
+			c.stepDownLocked(fmt.Sprintf("lease taken by another gateway (last renewed %v ago)", age))
+		} else {
+			c.stepDownLocked(fmt.Sprintf("lease not renewed for %v: %v", age, err))
+		}
+		return false
+	}
+	c.setRenewed(time.Now())
+	c.log.Warn("lease renewed late; still serving the VIP", "last_renewed", age)
+	return true
+}
 
 // Stats returns a snapshot.
 func (c *Controller) Stats() Stats {
@@ -198,10 +264,10 @@ func (c *Controller) tick(ctx context.Context) {
 		err := c.renew(rctx)
 		switch {
 		case err == nil:
-			c.lastRenew = time.Now()
+			c.setRenewed(time.Now())
 		case errors.Is(err, errLost):
 			c.stepDownLocked("lease taken by another gateway")
-		case time.Since(c.lastRenew) > c.cfg.LeaseDuration*2/3:
+		case !c.leaseFresh():
 			// Another gateway may take the VIP once the lease runs out:
 			// let go first, so the VIP is never answered twice.
 			c.stepDownLocked("can't renew the lease: " + err.Error())
@@ -346,9 +412,7 @@ func (c *Controller) takeOver(from string) {
 		}
 		cancel()
 		if err == nil {
-			c.mu.Lock()
-			c.lastRenew = time.Now()
-			c.mu.Unlock()
+			c.setRenewed(time.Now())
 			return
 		}
 		c.log.Warn("taking the lease over failed; retrying", "err", err)
@@ -359,13 +423,18 @@ func (c *Controller) takeOver(from string) {
 // ---- becoming active, stepping down ----
 
 func (c *Controller) activateLocked(why string) {
+	// Whatever sessions this gateway still has are from an earlier turn
+	// (frozen by a handoff out, say): start clean, so relays get fresh ones.
+	if n := c.cfg.Gateway.Forget(); n > 0 {
+		c.log.Info("forgot stale relay sessions", "players", n)
+	}
 	c.cfg.Gateway.ForwardTunnels("") // relays are ours again
 	if err := c.cfg.NS.Up(); err != nil {
 		c.log.Error("bringing the VIP up failed", "err", err)
 		return
 	}
+	c.setRenewed(time.Now())
 	c.active.Store(true)
-	c.lastRenew = time.Now()
 	c.stats.Since = time.Now()
 	c.log.Info("serving the VIP", "why", why)
 	go c.setLabel(context.Background(), true)
@@ -681,8 +750,8 @@ func (c *Controller) serveHandoff(conn net.Conn) {
 		return
 	}
 	probeAll(conns)
+	c.setRenewed(time.Now())
 	c.active.Store(true)
-	c.lastRenew = time.Now()
 	c.stats.HandoffsIn++
 	c.stats.LastHandoff = "in from " + string(from)
 	c.stats.LastPlayers = restored

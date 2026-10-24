@@ -47,6 +47,10 @@ type MinecraftConfig struct {
 	// Whitelist, if set, decides who may wake (and be held for) an asleep
 	// backend; others get the vanilla "not white-listed" disconnect.
 	Whitelist *Whitelist
+	// AwakeGrace is how long a backend whose relay went away without saying
+	// its server exited still counts as up (a migration, a reconnect) rather
+	// than asleep, for the whitelist.
+	AwakeGrace time.Duration
 }
 
 // notWhitelisted is the vanilla server's message.
@@ -77,6 +81,31 @@ func (m *MinecraftConfig) defaults() {
 	if m.MenuTitle == "" {
 		m.MenuTitle = "Minecraft servers"
 	}
+	if m.AwakeGrace <= 0 {
+		m.AwakeGrace = 2 * time.Minute
+	}
+}
+
+// asleep reports whether b's server is down, as far as this gateway knows
+// (Minecraft mode): no relay is attached, and either the last one said its
+// server exited (FINAL GOAWAY), none has been seen since this session began
+// (the gateway just started, or forgot its sessions), or it has been away
+// longer than AwakeGrace. A relay away for less without saying goodbye is a
+// migration or a reconnect, and a backend woken within the hold limit is
+// starting: neither is asleep.
+func (g *Gateway) asleep(b *Backend) bool {
+	mc := g.cfg.Minecraft
+	s := b.Session().Stats()
+	if s.Connected {
+		return false
+	}
+	if last := b.lastWake.Load(); last != 0 && time.Since(time.Unix(0, last)) < mc.MaxHold {
+		return false
+	}
+	if s.PeerExited || !s.Bound {
+		return true
+	}
+	return time.Since(s.DownSince) > mc.AwakeGrace
 }
 
 // motd fills in {backend} (the server the player asked for).
@@ -107,7 +136,7 @@ func (g *Gateway) handleMinecraft(c net.Conn, b *Backend) {
 		}
 		if mcproto.IsLegacyPing(rd.Raw()) {
 			if b.Session().Connected() {
-				g.addStream(b, &replayConn{Conn: c, prefix: rd.Raw()}, "legacy-status", log)
+				g.addStream(b, &replayConn{Conn: c, prefix: rd.Raw()}, "legacy-status", false, log)
 				return
 			}
 			log.Debug("legacy ping answered locally")
@@ -151,7 +180,7 @@ func (g *Gateway) handleMinecraft(c net.Conn, b *Backend) {
 	if hs.Intent == mcproto.IntentStatus {
 		if b.Session().Connected() {
 			c.SetReadDeadline(time.Time{})
-			g.addStream(b, &replayConn{Conn: c, prefix: rd.Raw()}, "status", log)
+			g.addStream(b, &replayConn{Conn: c, prefix: rd.Raw()}, "status", false, log)
 			return
 		}
 		g.answerStatus(c, rd, func() any { return mcproto.NewStatus(motd(mc.MOTD, b), mc.VersionName, hs.Protocol) },
@@ -185,7 +214,11 @@ func (g *Gateway) handleMinecraft(c net.Conn, b *Backend) {
 		g.serveMenu(c, rd, hs, body, log)
 		return
 	}
-	if !b.Session().Connected() && !mc.Whitelist.Allowed(b.Name, name, loginUUID(body, len(mcproto.AppendString(nil, name)))) {
+	// The whitelist only decides who may wake an asleep backend: a player who
+	// isn't listed is still held while it is up, briefly away (migrating, its
+	// relay reconnecting) or starting, but never wakes it.
+	listed := mc.Whitelist.Allowed(b.Name, name, loginUUID(body, len(mcproto.AppendString(nil, name))))
+	if !listed && g.asleep(b) {
 		log.Info("not whitelisted; refused without waking", "backend", b.Name)
 		g.metrics.conns.Inc(b.Name, resultNotWhitelisted)
 		c.SetWriteDeadline(time.Now().Add(5 * time.Second))
@@ -201,7 +234,10 @@ func (g *Gateway) handleMinecraft(c net.Conn, b *Backend) {
 		limit = min(limit, mc.LegacyMaxHold)
 	}
 	hc := newHoldConn(c, raw)
-	st := g.addStream(b, hc, "login", log)
+	st := g.addStream(b, hc, "login", listed, log)
+	if st == nil {
+		return
+	}
 	go g.hold(hc, st, b, keepalive, limit, log.With("stream", st.ID()))
 }
 
@@ -258,7 +294,11 @@ func (g *Gateway) hold(hc *holdConn, st *tunnel.Stream, b *Backend, keepalive bo
 	for {
 		select {
 		case <-hc.released:
-			if injected > 0 {
+			if hc.state.Load() == holdHolding {
+				// Closed before the server spoke: the player left, or the
+				// gateway forgot the session.
+				log.Info("held player disconnected", "held", time.Since(start).Round(time.Millisecond), "keepalives", injected)
+			} else if injected > 0 {
 				log.Info("held player released", "held", time.Since(start).Round(time.Millisecond), "keepalives", injected)
 			}
 			return

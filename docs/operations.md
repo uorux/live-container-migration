@@ -72,6 +72,10 @@ forwards uncompressed to an old source.
   re-read within seconds of a change) makes the gateway refuse a login to an *asleep* backend
   from anyone not listed, with the vanilla "not white-listed" message, before anything wakes. The
   menu does the same with a notice. Running servers are untouched: they check for themselves.
+  *Asleep* means no relay is attached and either the last one said its server exited, none has
+  attached since the gateway started, or it has been away over 2 minutes. A server whose relay
+  is briefly away (a migration, a reconnect) or that a listed player is starting counts as
+  awake: unlisted players are held like anyone else, but never cause a wake.
   Login names aren't authenticated, so this stops scanners and bots, not someone who knows a
   listed name. Refusals count as `lcm_gateway_player_connections_total{result="not_whitelisted"}`.
   An unreadable list allows nobody, and an empty one is logged at startup.

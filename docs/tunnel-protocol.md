@@ -43,7 +43,7 @@ increasing order, and are never reused within a gateway process.
 | 7 | CLOSE | both | fin_offset u64 (the sender writes no bytes at or after this offset) |
 | 8 | RESET | both | code u8 · message (u16 len) |
 | 9/10 | PING/PONG | both | u64 echo value |
-| 11 | GOAWAY | both | flags u8 (bit0 FINAL) · message (u16 len) |
+| 11 | GOAWAY | both | flags u8 (bit0 FINAL, bit1 REBIND) · message (u16 len) |
 
 `entries` is a u32 count followed by that many `{id u32, rx_offset u64, flags u8 (bit0 FIN received)}`.
 
@@ -91,7 +91,17 @@ On the gateway, under one lock:
 On the relay, applying HELLO_ACK:
 
 - NEW → drop all streams, closing the loopback connections, and reset `max_seen` to 0. This
-  happens when the gateway restarted and lost the session.
+  happens when the gateway restarted and lost the session, or when a different gateway now
+  serves (the VIP moved without a handoff).
+  - If some gateway had accepted the session id before, the relay never presents it again:
+    another gateway may still hold it, with streams of its own (one that lost the VIP while
+    stalled), and resuming those there would splice stale streams onto live players, held back
+    only by the offset check. Before processing anything, the relay sends GOAWAY with REBIND
+    as its first frame, half-closes, waits for the gateway to close, picks a new random id and
+    reconnects at once. A gateway receiving REBIND as the first frame on a connection it
+    answered NEW turns the streams it opened on that connection back into never-opened ones,
+    so the players held there are opened on the next session instead of being reset. (Older
+    gateways ignore the bit, and reset those streams.)
 - RESUMED → each listed stream sets `tx_next = gateway.rx_offset` (checked the same way). Any
   stream not listed is closed: the player is gone. Any listed stream the relay no longer has
   gets a RESET.
@@ -159,7 +169,8 @@ Neither changes the wire protocol.
   gateway closes the connection. A non-final GOAWAY (quiesce) means "hold the players, I'll be
   back". A **FINAL** GOAWAY (the server process exited) makes the gateway deliver anything
   queued and close every opened stream of the session. Players who have not been opened yet
-  stay queued for the next session.
+  stay queued for the next session. The gateway also takes it to mean the server is asleep (for
+  `-whitelist`). REBIND is described under Reconciliation.
 - **Quiesce, via the control socket** (`/run/lcm/relay.sock`, one command per line):
   - `quiesce` → GOAWAY and close the tunnel, stop reconnecting, wait for in-flight loopback
     dials, then check `/proc/self/fd` against `/proc/self/net/{tcp,tcp6,udp,udp6}` until no

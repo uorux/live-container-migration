@@ -424,7 +424,10 @@ func (m *menuSession) run(clicks <-chan string, gone <-chan struct{}) string {
 					return m.transfer(b)
 				}
 				showing = false
-				if !mc.Whitelist.Allowed(b.Name, m.ls.Name, &m.ls.UUID) {
+				// As for logins: unlisted players may wait for a server that is
+				// up but briefly away (migrating), never wake an asleep one.
+				listed := mc.Whitelist.Allowed(b.Name, m.ls.Name, &m.ls.UUID)
+				if !listed && g.asleep(b) {
 					m.log.Info("menu: not whitelisted; not starting", "backend", b.Name)
 					g.metrics.conns.Inc(b.Name, resultNotWhitelisted)
 					m.showNotice("Not whitelisted", "You aren't on the whitelist for "+g.label(b)+".")
@@ -435,13 +438,15 @@ func (m *menuSession) run(clicks <-chan string, gone <-chan struct{}) string {
 					continue
 				}
 				waiting, waitSince, lastNote = b, time.Now(), time.Now()
-				m.log.Info("menu: starting server for player", "backend", b.Name)
-				g.wake(b, func(err error) {
-					select {
-					case wakeErrs <- wakeResult{b, err}:
-					default:
-					}
-				})
+				m.log.Info("menu: starting server for player", "backend", b.Name, "listed", listed)
+				if listed {
+					g.wake(b, func(err error) {
+						select {
+						case wakeErrs <- wakeResult{b, err}:
+						default:
+						}
+					})
+				}
 				if m.showNotice("Starting "+g.label(b), startingText(g.label(b), 0)) != nil {
 					return menuLeft
 				}
