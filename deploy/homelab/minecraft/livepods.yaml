@@ -226,7 +226,7 @@
         "containers": [
           {
             "name": "mc",
-            "image": "MISSING-DIGEST/atm10",
+            "image": "git.rooty.dev/minecraft/atm10@sha256:252f7d82402bc5daf8ccaf71e00c972ef3af16cc1e41275a4292aff40124808f",
             "command": [
               "/lcm/lcm-relay",
               "run",
@@ -386,7 +386,7 @@
         "containers": [
           {
             "name": "mc",
-            "image": "MISSING-DIGEST/bettermc",
+            "image": "git.rooty.dev/minecraft/bettermc@sha256:b920f75ccbfe5e2148d73da2e02ec3680499961bee53bd79100d759813fb7e2b",
             "command": [
               "/lcm/lcm-relay",
               "run",
@@ -546,7 +546,7 @@
         "containers": [
           {
             "name": "mc",
-            "image": "MISSING-DIGEST/evolution",
+            "image": "git.rooty.dev/minecraft/evolution@sha256:5c9e3e0676fded38dff8589bbe1b1b91e36dfa343244ff786ee50276c6e939fe",
             "command": [
               "/lcm/lcm-relay",
               "run",
@@ -706,7 +706,7 @@
         "containers": [
           {
             "name": "mc",
-            "image": "MISSING-DIGEST/ob2",
+            "image": "git.rooty.dev/minecraft/ob2@sha256:5c6cf79ea618106161ee80b53820234483628dd68a1d7431a4011fe5cc971bf8",
             "command": [
               "/lcm/lcm-relay",
               "run",
@@ -1026,7 +1026,7 @@
         "containers": [
           {
             "name": "mc",
-            "image": "MISSING-DIGEST/skies2",
+            "image": "git.rooty.dev/minecraft/skies2@sha256:e826d3b27c6331bda21e3538332f2b35cff34ec976aabf571048be73c10ae20d",
             "command": [
               "/lcm/lcm-relay",
               "run",
@@ -1186,7 +1186,7 @@
         "containers": [
           {
             "name": "mc",
-            "image": "MISSING-DIGEST/p2haustian",
+            "image": "git.rooty.dev/minecraft/p2haustian@sha256:64e0f48b33de47e7d7d385947f303afbfaeb473372e722756fc8832d33e6b995",
             "command": [
               "/lcm/lcm-relay",
               "run",
@@ -1346,7 +1346,7 @@
         "containers": [
           {
             "name": "mc",
-            "image": "MISSING-DIGEST/dungeonheroes",
+            "image": "git.rooty.dev/minecraft/dungeonheroes@sha256:4dc786cf50a0e904be8c9d6ad7915ac700db06f5de035375d1d29dcb9cf6db60",
             "command": [
               "/lcm/lcm-relay",
               "run",
@@ -1506,7 +1506,7 @@
         "containers": [
           {
             "name": "mc",
-            "image": "MISSING-DIGEST/integratedmc",
+            "image": "git.rooty.dev/minecraft/integratedmc@sha256:1d1ff4f1b0d5a91173b2b207ef9fb96ec7ce00bad4a798aab3f92fec93d19ff4",
             "command": [
               "/lcm/lcm-relay",
               "run",
@@ -1666,7 +1666,7 @@
         "containers": [
           {
             "name": "mc",
-            "image": "MISSING-DIGEST/abyssalascent",
+            "image": "git.rooty.dev/minecraft/abyssalascent@sha256:73408a5e27d0c2dbf8a30e1871d9f05643d5ac3bac7c7ea3d528bd24a7ee0ba3",
             "command": [
               "/lcm/lcm-relay",
               "run",
