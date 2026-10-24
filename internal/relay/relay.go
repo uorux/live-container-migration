@@ -248,9 +248,12 @@ func (r *Relay) Run(ctx context.Context) {
 			continue
 		}
 		var delay time.Duration
-		if connected {
+		switch {
+		case connected:
 			backoff = r.cfg.BackoffMin
-		} else {
+		case errors.Is(err, tunnel.ErrNewSession):
+			// The gateway didn't know the session: reconnect at once with the new id.
+		default:
 			delay = backoff
 			if errors.Is(err, tunnel.ErrRejected) || errors.Is(err, wire.ErrAuth) {
 				delay = r.cfg.BackoffMax

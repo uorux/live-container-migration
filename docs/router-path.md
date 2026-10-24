@@ -46,8 +46,15 @@ or the gateway is upgraded. Players see a pause of about 0.1 s; nobody is discon
     are lost.
   - **Partitioned active gateway:** if it can't renew for 2/3 of the lease, it takes its VIP
     down before anyone else may take it.
-  - **Hung but not crashed (e.g. SIGSTOP):** it keeps answering ARP until it runs again, then
-    steps down at its next tick. Lab: 11 s of overlap.
+  - **Hung but not crashed (e.g. SIGSTOP):** it keeps answering ARP until it runs again. Then,
+    before serving any connection (connections queued in the kernel meanwhile are accepted at
+    once), it checks that its last lease renewal is under 2/3 of the lease old (monotonic or
+    wall clock, whichever says longer); if not, it renews on the spot or steps down, and refuses
+    the connection. Lab: 11 s of overlap.
+  - **Stepping down without a handoff** drops the relays and forgets their sessions and the
+    players still attached (held logins included): a relay that came back later with the same
+    session id must not resume streams from before. Relays that a gateway didn't know start a
+    new session id anyway (see tunnel-protocol.md, Reconciliation).
 
 ## Lab results (2026-10-23; VIP 192.168.100.250 on node2/node3, echo client on node1)
 

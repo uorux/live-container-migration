@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -31,6 +32,11 @@ type Conn struct {
 	ctrl       []byte // encoded control frames waiting for the writer
 	goaway     []byte // GOAWAY payload once requested
 	goawaySent bool
+
+	// guarded by s.mu: frames received, and (gateway) whether the handshake
+	// answered NEW
+	frames      int
+	answeredNew bool
 
 	once     sync.Once
 	errMu    sync.Mutex
@@ -238,6 +244,11 @@ func ServerHandshake(nc net.Conn, token []byte, timeout time.Duration, lookup Se
 // ErrRejected is returned by ClientHandshake when the gateway refuses the relay.
 var ErrRejected = errors.New("gateway rejected relay")
 
+// ErrNewSession is returned by ClientHandshake when the gateway did not know
+// the session although a gateway had accepted it before: the session has a
+// new id now (see Session.renewID), and the caller should reconnect at once.
+var ErrNewSession = errors.New("gateway does not know this session; new session id")
+
 // ClientHandshake runs the relay side of the handshake on nc and returns an
 // attached Conn ready to Run. On error nc is closed.
 func (s *Session) ClientHandshake(nc net.Conn, backend string) (*Conn, error) {
@@ -284,6 +295,18 @@ func (s *Session) ClientHandshake(nc net.Conn, backend string) (*Conn, error) {
 	}
 	if a.Window < 4096 {
 		return fail(fmt.Errorf("%w: window too small", wire.ErrProtocol))
+	}
+	if a.Status == wire.AckNew && s.renewID() {
+		// Hang up before processing anything, saying so: the gateway then
+		// opens the streams it sent OPENs for on this connection again on
+		// the next one, which presents the new id.
+		nc.Write(wire.AppendFrame(nil, wire.TGoAway, 0, wire.GoAwayPayload(wire.GoAwayRebind, "new session id")))
+		if cw, ok := nc.(closeWriter); ok {
+			cw.CloseWrite()
+			nc.SetReadDeadline(time.Now().Add(time.Second))
+			io.Copy(io.Discard, nc)
+		}
+		return fail(ErrNewSession)
 	}
 	nc.SetDeadline(time.Time{})
 	c := newConn(s, nc, r)

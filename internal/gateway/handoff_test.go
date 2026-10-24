@@ -3,10 +3,13 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
+	"errors"
 	"io"
 	"net"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -191,26 +194,88 @@ func waitUntil(t *testing.T, what string, cond func() bool) {
 	}
 }
 
-// A gateway that stops serving without a handoff drops its relays; they reconnect.
+// A gateway that stops serving without a handoff drops its relays, which
+// reconnect, and forgets their sessions and players: the relay comes back
+// with a new session (nothing from before the drop is resumed), and the
+// players connected then are disconnected.
 func TestDropTunnels(t *testing.T) {
-	gw := New(Config{Tunnel: testTunnelCfg(), Logger: testLogger(), Backend: "default"})
-	tl, _ := Listen(context.Background(), "127.0.0.1:0")
-	go gw.ServeTunnel(tl)
-	defer tl.Close()
-	srv := echoServer(t)
-	r := relay.New(relay.Config{Gateway: tl.Addr().String(), Backend: "default", Upstream: srv, Tunnel: testTunnelCfg(),
+	e := newMCEnv(t, nil)
+	r := relay.New(relay.Config{Gateway: e.tunnelAddr, Backend: "default", Upstream: echoServer(t), Tunnel: testTunnelCfg(),
 		BackoffMin: 20 * time.Millisecond, BackoffMax: 100 * time.Millisecond, Logger: testLogger()})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { r.Run(ctx); close(done) }()
 	defer func() { cancel(); <-done }()
-	e := &mcEnv{t: t, gw: gw}
-	e.waitFor("relay connected", func() bool { return gw.DefaultBackend().Session().Connected() })
-	if n := gw.DropTunnels(); n != 1 {
+	e.waitFor("relay connected", e.session().Connected)
+	p := e.dial()
+	p.c.Write([]byte("before"))
+	p.expect([]byte("before"))
+	oldID := r.SessionID()
+
+	if n := e.gw.DropTunnels(); n != 1 {
 		t.Fatalf("dropped %d relay connections, want 1", n)
 	}
-	e.waitFor("relay reconnected", func() bool {
-		return scrape(t, gw)[`lcm_gateway_tunnel_connects_total{backend="default",kind="resume"}`] >= 1 &&
-			gw.DefaultBackend().Session().Connected()
-	})
+	p.expectEOF()
+	e.waitFor("relay reconnected", e.session().Connected)
+	id := e.session().ID()
+	if r.SessionID() == oldID || r.SessionID() != hex.EncodeToString(id[:]) {
+		t.Fatalf("relay session %s (was %s), gateway has %x: want a new id on both", r.SessionID(), oldID, id)
+	}
+	if n := scrape(t, e.gw)[`lcm_gateway_tunnel_connects_total{backend="default",kind="resume"}`]; n != 0 {
+		t.Fatalf("%v resumes after forgetting the sessions", n)
+	}
+	p2 := e.dial()
+	p2.c.Write([]byte("after"))
+	p2.expect([]byte("after"))
+}
+
+// Logins held when the gateway forgets its sessions are disconnected, not
+// left waiting for a relay that will never come back here.
+func TestForgetDropsHeldPlayers(t *testing.T) {
+	e := newMCEnv(t, &MinecraftConfig{HoldInterval: testInterval})
+	p := e.login(774, "Steve")
+	p.keepalives(1, testInterval)
+	if n := e.gw.Forget(); n != 1 {
+		t.Fatalf("Forget closed %d players, want 1", n)
+	}
+	p.c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := io.Copy(io.Discard, p.br); err != nil && !errors.Is(err, syscall.ECONNRESET) {
+		t.Fatalf("held player not disconnected: %v", err)
+	}
+	e.waitFor("hold over", func() bool { return e.gw.Status(false).Backends[0].Held == 0 })
+	if n := e.session().NumStreams(); n != 0 {
+		t.Fatalf("%d streams in the new session", n)
+	}
+}
+
+// While the gate says no, neither players nor relays are served.
+func TestGate(t *testing.T) {
+	e := newMCEnv(t, nil)
+	var open atomic.Bool
+	e.gw.SetGate(open.Load)
+	srv := echoServer(t)
+	r := relay.New(relay.Config{Gateway: e.tunnelAddr, Backend: "default", Upstream: srv, Tunnel: testTunnelCfg(),
+		BackoffMin: 20 * time.Millisecond, BackoffMax: 50 * time.Millisecond, Logger: testLogger()})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { r.Run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+
+	p := e.dial()
+	p.c.Write([]byte("hello"))
+	p.c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	var ne net.Error
+	if n, err := p.br.Read(make([]byte, 1)); n != 0 || errors.As(err, &ne) && ne.Timeout() {
+		t.Fatalf("a closed gate must refuse the player: read %d, %v", n, err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if st := e.session().Stats(); st.Connects != 0 || st.Streams != 0 {
+		t.Fatalf("closed gate: %d relay connects, %d streams", st.Connects, st.Streams)
+	}
+
+	open.Store(true)
+	e.waitFor("relay connected", e.session().Connected)
+	p = e.dial()
+	p.c.Write([]byte("hello"))
+	p.expect([]byte("hello"))
 }

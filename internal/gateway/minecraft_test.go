@@ -43,7 +43,13 @@ type mcEnv struct {
 
 func newMCEnv(t *testing.T, mc *MinecraftConfig) *mcEnv {
 	t.Helper()
-	gw := New(Config{Tunnel: testTunnelCfg(), Logger: testLogger(), Minecraft: mc})
+	return newEnv(t, Config{Tunnel: testTunnelCfg(), Logger: testLogger(), Minecraft: mc})
+}
+
+// newEnv serves players and relays with a gateway configured by cfg.
+func newEnv(t *testing.T, cfg Config) *mcEnv {
+	t.Helper()
+	gw := New(cfg)
 	pl, err := Listen(context.Background(), "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

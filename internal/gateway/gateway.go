@@ -83,8 +83,9 @@ type Gateway struct {
 	started  time.Time
 	metrics  *gwMetrics
 
-	tunnelForward atomic.Pointer[string] // see ForwardTunnels
-	tunnels       sync.Map               // relay connections being served: net.Conn -> struct{}
+	tunnelForward atomic.Pointer[string]      // see ForwardTunnels
+	tunnels       sync.Map                    // relay connections being served: net.Conn -> struct{}
+	gate          atomic.Pointer[func() bool] // see SetGate
 
 	cookieMu    sync.Mutex
 	usedCookies map[string]time.Time // menu cookie nonces already redeemed
@@ -203,7 +204,29 @@ func (g *Gateway) ServePlayers(ln net.Listener, b *Backend) error {
 	}
 }
 
+// SetGate makes the gateway ask admit before it serves a new player or relay
+// connection, and refuse the connection when it answers false. A VIP gateway
+// uses it so that, after a stall, nothing is served before it knows it still
+// holds the lease. Nil admits everything.
+func (g *Gateway) SetGate(admit func() bool) {
+	if admit == nil {
+		g.gate.Store(nil)
+		return
+	}
+	g.gate.Store(&admit)
+}
+
+func (g *Gateway) admit() bool {
+	f := g.gate.Load()
+	return f == nil || (*f)()
+}
+
 func (g *Gateway) handlePlayer(c net.Conn, b *Backend) {
+	if !g.admit() {
+		g.log.Info("not serving players now; connection refused", "src", c.RemoteAddr().String())
+		abortClose(c)
+		return
+	}
 	if g.trustedProxy(c.RemoteAddr()) {
 		pc, err := readProxyHeader(c)
 		if err != nil {
@@ -217,7 +240,7 @@ func (g *Gateway) handlePlayer(c net.Conn, b *Backend) {
 		g.handleMinecraft(c, b)
 		return
 	}
-	g.addStream(b, c, "l4", g.log.With("src", c.RemoteAddr().String()))
+	g.addStream(b, c, "l4", true, g.log.With("src", c.RemoteAddr().String()))
 }
 
 func (g *Gateway) trustedProxy(a net.Addr) bool {
@@ -269,15 +292,31 @@ func readProxyHeader(c net.Conn) (net.Conn, error) {
 	return pc, nil
 }
 
-// addStream hands a player connection to the backend's session.
-func (g *Gateway) addStream(b *Backend, c net.Conn, kind string, log *slog.Logger) *tunnel.Stream {
+// addStream hands a player connection to the backend's session, and with
+// wake set asks for the backend to be started if it is asleep. It returns nil,
+// having closed c, if the gateway stopped serving players meanwhile (see
+// SetGate and Forget).
+func (g *Gateway) addStream(b *Backend, c net.Conn, kind string, wake bool, log *slog.Logger) *tunnel.Stream {
+	if !g.admit() {
+		log.Info("not serving players now; connection refused")
+		abortClose(c)
+		return nil
+	}
 	open := wire.Open{Src: addrPort(c.RemoteAddr()), Dst: addrPort(c.LocalAddr())}
-	st := b.Session().AddStream(c, open)
+	sess := b.Session()
+	st := sess.AddStream(c, open)
+	if b.Session() != sess {
+		// Forgotten meanwhile (Forget swaps the session, then closes the old
+		// one's streams): don't leave the player in a session nothing serves.
+		st.Reset(wire.ResetLocal, "session forgotten")
+		log.Info("relay session forgotten while connecting; connection closed")
+		return nil
+	}
 	g.metrics.conns.Inc(b.Name, resultOpened)
-	if kind == "login" || kind == "l4" {
+	if wake {
 		g.maybeWake(b)
 	}
-	log.Info("player connected", "stream", st.ID(), "kind", kind, "tunnel_up", b.Session().Connected())
+	log.Info("player connected", "stream", st.ID(), "kind", kind, "tunnel_up", sess.Connected())
 	return st
 }
 
@@ -375,7 +414,9 @@ func (g *Gateway) ForwardTunnels(addr string) {
 // DropTunnels closes every relay connection this gateway serves, so the relays reconnect, and,
 // through ForwardTunnels, reach whichever gateway serves now. A VIP gateway that loses its lease
 // without handing off calls it: otherwise its relays stay with it, and players arriving at the
-// new holder wait for servers that never connect there. It returns how many it closed.
+// new holder wait for servers that never connect there. It then forgets the relay sessions and
+// their players (Forget): the relays are someone else's now. It returns how many relay
+// connections it closed.
 func (g *Gateway) DropTunnels() int {
 	n := 0
 	g.tunnels.Range(func(k, _ any) bool {
@@ -383,6 +424,26 @@ func (g *Gateway) DropTunnels() int {
 		n++
 		return true
 	})
+	if players := g.Forget(); players > 0 {
+		g.log.Info("forgot the relay sessions; their players were disconnected", "players", players)
+	}
+	return n
+}
+
+// Forget replaces every backend's relay session with a new, empty one, and
+// closes the old sessions' player connections, held logins included. Nothing
+// of them may outlive this gateway serving: a relay that came back later with
+// the same session id would resume streams from another era (dead, or
+// another gateway's by now), and only the offset check would stand between a
+// stale stream and someone else's player. It returns the number of player
+// connections closed.
+func (g *Gateway) Forget() int {
+	n := 0
+	for _, b := range g.backendList() {
+		old := b.sess.Swap(tunnel.NewSession(tunnel.RoleGateway, b.tc, [wire.SessionIDLen]byte{}, nil))
+		n += old.NumStreams()
+		old.CloseAll()
+	}
 	return n
 }
 
@@ -405,6 +466,11 @@ func forwardTunnel(c net.Conn, addr string, log *slog.Logger) {
 
 func (g *Gateway) handleTunnel(nc net.Conn) {
 	defer g.tunnels.Delete(nc) // stored by ServeTunnel
+	if !g.admit() {
+		g.log.Info("not serving relays now; connection refused", "remote", nc.RemoteAddr().String())
+		nc.Close()
+		return
+	}
 	conn, err := tunnel.ServerHandshake(nc, g.cfg.Tunnel.Token, g.cfg.Tunnel.HandshakeTimeout, g.lookup)
 	if err != nil {
 		g.log.Warn("tunnel handshake failed", "remote", nc.RemoteAddr().String(), "err", err)

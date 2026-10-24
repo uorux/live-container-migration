@@ -527,6 +527,11 @@ const (
 	// GoAwayFinal: the session is ending for good (server process exited); the
 	// gateway should close all of the session's streams instead of holding them.
 	GoAwayFinal = 1 << 0
+	// GoAwayRebind (relay, as the first frame after a HELLO_ACK of status NEW):
+	// the relay processed nothing on this connection and reconnects at once
+	// with a new session id; the gateway offers the streams it opened on this
+	// connection again, as never opened.
+	GoAwayRebind = 1 << 1
 )
 
 func GoAwayPayload(flags uint8, msg string) []byte { return appendStr16([]byte{flags}, msg) }
