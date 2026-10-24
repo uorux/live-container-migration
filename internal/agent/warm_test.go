@@ -77,3 +77,25 @@ func TestRoundEstimate(t *testing.T) {
 		}
 	}
 }
+
+func TestFinalEstimate(t *testing.T) {
+	const mb = 1 << 20
+	for _, tc := range []struct {
+		final      int64
+		rate       float64
+		sendBefore bool // FINAL right before the freeze
+	}{
+		{300 * mb, 2e6, false},   // the throttled lab link: READY ~160 s after the freeze
+		{300 * mb, 100e6, true},  // the same dump on a LAN
+		{100 * mb, 0, true},      // no pre-dump round: 50 MB/s assumed
+		{4000 * mb, 0, false},    // ... too long for a big one
+		{0, 2e6, true},           // nothing dirtied since the last round
+		{115 * mb, 2.2e6, true},  // ~57 s: within budget
+		{130 * mb, 2.2e6, false}, // ~64 s: not
+	} {
+		got := finalEstimate(tc.final, tc.rate) <= finalBudget
+		if got != tc.sendBefore {
+			t.Errorf("%+v: estimate %s, send FINAL = %v, want %v", tc, finalEstimate(tc.final, tc.rate), got, tc.sendBefore)
+		}
+	}
+}

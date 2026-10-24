@@ -234,7 +234,9 @@ func Migrate(ctx context.Context, kc kubernetes.Interface, o Options) (*Result, 
 	rolledBack := false
 	staged := time.Now() // the checkpoint stream ends once the destination acknowledged READY
 	var rollbackWait time.Duration
-	if err := waitRestored(ctx, kc, o.Namespace, res.DestPod, ctrName); err != nil {
+	if err := waitRestored(ctx, kc, o.Namespace, res.DestPod, ctrName, func(ctx context.Context) *api.RestoreResult {
+		return restoreResult(ctx, dstURL, o.Token, key)
+	}, logf); err != nil {
 		logf("restore on %s failed: %v", o.TargetNode, err)
 		// kubelet retries failed containers on its own, and a retry may restore fine. Fence the
 		// destination pod so no further attempt can start, then make sure none already has:
@@ -538,32 +540,117 @@ func transferURL(ctx context.Context, fromURL, toURL, token, cidr string, port i
 // restoredOK reports whether lcm-runc's last restore attempt for key succeeded. Call it after
 // fencing the key: the fence waits out a restore in flight, so the answer is final.
 func restoredOK(ctx context.Context, url, token, key string) bool {
-	b, err := agentDo(ctx, url, token, http.MethodGet, "/v1/stage/"+key+"/result", nil)
-	if err != nil {
-		return false
-	}
-	var rr api.RestoreResult
-	return json.Unmarshal(b, &rr) == nil && rr.ExitCode == 0 && rr.Error == ""
+	rr := restoreResult(ctx, url, token, key)
+	return rr != nil && rr.ExitCode == 0 && rr.Error == ""
 }
 
-func waitRestored(ctx context.Context, kc kubernetes.Interface, ns, pod, ctr string) error {
-	return waitPod(ctx, kc, ns, pod, 2*time.Minute, func(p *corev1.Pod) (bool, error) {
-		for _, s := range p.Status.ContainerStatuses {
-			if s.Name != ctr {
-				continue
-			}
-			if s.State.Running != nil {
+// restoreResult is lcm-runc's last restore result for key: nil if none was attempted since the
+// staging was reset (or the agent doesn't answer).
+func restoreResult(ctx context.Context, url, token, key string) *api.RestoreResult {
+	b, err := agentDo(ctx, url, token, http.MethodGet, "/v1/stage/"+key+"/result", nil)
+	if err != nil {
+		return nil
+	}
+	var rr api.RestoreResult
+	if json.Unmarshal(b, &rr) != nil {
+		return nil
+	}
+	return &rr
+}
+
+const (
+	// restoreWait bounds the wait for the restored container once the images are staged.
+	restoreWait = 2 * time.Minute
+	// restoreRetryWait bounds it when an earlier attempt failed before they were (see
+	// checkRestore): kubelet's back-off between attempts grows to 5 min.
+	restoreRetryWait = 6 * time.Minute
+)
+
+// waitRestored waits for the restored container ctr of pod to run, once its images are staged
+// (READY); result fetches lcm-runc's last restore result for it (see restoreResult).
+func waitRestored(ctx context.Context, kc kubernetes.Interface, ns, pod, ctr string, result func(context.Context) *api.RestoreResult, logf func(string, ...any)) error {
+	t0 := time.Now()
+	deadline := t0.Add(restoreWait)
+	var why error // a start failure kubelet's retry may make good
+	return wait.PollUntilContextCancel(ctx, 100*time.Millisecond, true, func(ctx context.Context) (bool, error) {
+		if p, err := kc.CoreV1().Pods(ns).Get(ctx, pod, metav1.GetOptions{}); err == nil {
+			state, err := checkRestore(p, ctr, func() *api.RestoreResult {
+				ctx, cancel := context.WithTimeout(ctx, 5*time.Second) // a dead agent mustn't stall the wait
+				defer cancel()
+				return result(ctx)
+			})
+			switch state {
+			case restoreRunning:
 				return true, nil
+			case restoreFailed:
+				return false, err
 			}
-			if w := s.State.Waiting; w != nil && w.Reason != "" && w.Reason != "ContainerCreating" && w.Reason != "PodInitializing" {
-				return false, fmt.Errorf("restored container %s: %s: %s", ctr, w.Reason, w.Message)
+			if err != nil {
+				if why == nil {
+					logf("%v; no restore attempted yet (an attempt gave up before the images were staged?): waiting up to %s for kubelet's retry", err, restoreRetryWait)
+				}
+				why, deadline = err, t0.Add(restoreRetryWait) // wait out kubelet's back-off
 			}
-			if t := s.LastTerminationState.Terminated; t != nil {
-				return false, fmt.Errorf("restored container %s exited: %s (code %d)", ctr, t.Reason, t.ExitCode)
+		}
+		if time.Now().After(deadline) {
+			if why != nil {
+				return false, fmt.Errorf("%w; no restore attempted within %s of the images being staged", why, restoreRetryWait)
 			}
+			return false, fmt.Errorf("restored container %s not running %s after the images were staged", ctr, restoreWait)
 		}
 		return false, nil
 	})
+}
+
+type restoreState int
+
+const (
+	restorePending restoreState = iota // being created or restored, or waiting for kubelet's retry
+	restoreRunning
+	restoreFailed
+)
+
+// checkRestore reads one look at the restored container ctr. A container that failed to start is
+// a failed restore only if a restore was attempted: lcm-runc waits for READY only so long (it runs
+// inside one CRI call, see cmd/lcm-runc), and an attempt that gave up before the images were
+// staged writes no result and leaves the container failed to start (containerd's StartError) and
+// kubelet backing off. Kubelet's next attempt restores the images, so until there is a result such
+// a failure is pending (and returned as why). A failed restore (a CRIU error) writes a result:
+// that, or any other failure, is final at once. result fetches lcm-runc's last result.
+func checkRestore(p *corev1.Pod, ctr string, result func() *api.RestoreResult) (restoreState, error) {
+	for _, s := range p.Status.ContainerStatuses {
+		if s.Name != ctr {
+			continue
+		}
+		if s.State.Running != nil {
+			return restoreRunning, nil
+		}
+		var why error
+		retried := p.Spec.RestartPolicy != corev1.RestartPolicyNever
+		if w := s.State.Waiting; w != nil && w.Reason != "" && w.Reason != "ContainerCreating" && w.Reason != "PodInitializing" {
+			why = fmt.Errorf("restored container %s: %s: %s", ctr, w.Reason, w.Message)
+			retried = retried && (w.Reason == "CrashLoopBackOff" || w.Reason == "RunContainerError")
+		}
+		if t := s.LastTerminationState.Terminated; t != nil {
+			if why == nil {
+				why = fmt.Errorf("restored container %s exited: %s (code %d)", ctr, t.Reason, t.ExitCode)
+			}
+			retried = retried && t.Reason == "StartError"
+		}
+		switch {
+		case why == nil:
+			return restorePending, nil
+		case !retried:
+			return restoreFailed, why
+		}
+		if rr := result(); rr != nil && (rr.ExitCode != 0 || rr.Error != "") {
+			return restoreFailed, fmt.Errorf("%w; restore: %s", why, rr.Error)
+		}
+		// No attempt since READY yet, one in flight, or one that succeeded and kubelet hasn't
+		// reported it running yet.
+		return restorePending, why
+	}
+	return restorePending, nil
 }
 
 type rollbackResult struct{ DestPod, DestNode, key string }
@@ -621,7 +708,9 @@ func rollback(ctx context.Context, kc kubernetes.Interface, o Options, src *core
 		return nil, fmt.Errorf("forwarding images back to %s: %w", res.SourceNode, err)
 	}
 	logf("images forwarded back to %s in %s", res.SourceNode, time.Since(t0).Round(time.Millisecond))
-	if err := waitRestored(ctx, kc, o.Namespace, rb.DestPod, ctr); err != nil {
+	if err := waitRestored(ctx, kc, o.Namespace, rb.DestPod, ctr, func(ctx context.Context) *api.RestoreResult {
+		return restoreResult(ctx, srcURL, o.Token, rbKey)
+	}, logf); err != nil {
 		return nil, err
 	}
 	agentDo(context.WithoutCancel(ctx), dstURL, o.Token, http.MethodDelete, "/v1/stage/"+key, nil)

@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"lcm/internal/api"
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -192,6 +194,69 @@ func TestCheckMigratable(t *testing.T) {
 				t.Errorf("unexpected error: %v", err)
 			case c.errSub != "" && (err == nil || !strings.Contains(err.Error(), c.errSub)):
 				t.Errorf("error %v, want one mentioning %q", err, c.errSub)
+			}
+		})
+	}
+}
+
+func TestCheckRestore(t *testing.T) {
+	startError := &corev1.ContainerStateTerminated{Reason: "StartError", ExitCode: 128,
+		Message: "failed to create containerd task: ... lcm: the final checkpoint for games_mc-m1_paper was not staged within 1m40s"}
+	waiting := func(reason string) corev1.ContainerState {
+		return corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: reason}}
+	}
+	var (
+		none    *api.RestoreResult
+		failed  = &api.RestoreResult{ExitCode: 1, Error: "runc restore: exit status 1"}
+		success = &api.RestoreResult{}
+	)
+	cases := []struct {
+		name   string
+		state  corev1.ContainerState
+		last   *corev1.ContainerStateTerminated
+		policy corev1.RestartPolicy
+		result *api.RestoreResult
+		want   restoreState
+		why    bool // pending with a reason (waiting out kubelet's back-off)
+	}{
+		{name: "creating", state: waiting("ContainerCreating"), result: none, want: restorePending},
+		{name: "running", state: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}, last: startError, want: restoreRunning},
+		// An attempt gave up before READY; kubelet is backing off, or its retry is under way.
+		{name: "back-off after not staged", state: waiting("CrashLoopBackOff"), last: startError, result: none, want: restorePending, why: true},
+		{name: "retry under way", state: waiting("ContainerCreating"), last: startError, result: none, want: restorePending, why: true},
+		{name: "first start failed", state: waiting("RunContainerError"), result: none, want: restorePending, why: true},
+		{name: "retry restored, not reported yet", state: waiting("ContainerCreating"), last: startError, result: success, want: restorePending, why: true},
+		// A restore was attempted and failed: roll back now.
+		{name: "restore failed", state: waiting("CrashLoopBackOff"), last: startError, result: failed, want: restoreFailed},
+		{name: "first restore failed", state: waiting("RunContainerError"), result: failed, want: restoreFailed},
+		// Failures no retry of lcm-runc makes good stay final at once.
+		{name: "restored process exited", state: waiting("CrashLoopBackOff"),
+			last: &corev1.ContainerStateTerminated{Reason: "Error", ExitCode: 1}, result: success, want: restoreFailed},
+		{name: "config error", state: waiting("CreateContainerConfigError"), result: none, want: restoreFailed},
+		{name: "image", state: waiting("ImagePullBackOff"), result: none, want: restoreFailed},
+		{name: "never restarted", state: corev1.ContainerState{Terminated: startError}, last: startError,
+			policy: corev1.RestartPolicyNever, result: none, want: restoreFailed},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := corev1.ContainerStatus{Name: "paper", State: c.state}
+			if c.last != nil {
+				s.LastTerminationState.Terminated = c.last
+			}
+			p := &corev1.Pod{
+				Spec: corev1.PodSpec{RestartPolicy: c.policy},
+				Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{
+					{Name: "relay-sidecar", State: waiting("CrashLoopBackOff")}, s}},
+			}
+			got, why := checkRestore(p, "paper", func() *api.RestoreResult { return c.result })
+			if got != c.want {
+				t.Fatalf("state %d (%v), want %d", got, why, c.want)
+			}
+			if c.want == restoreFailed && why == nil {
+				t.Fatal("failed without a reason")
+			}
+			if c.want == restorePending && (why != nil) != c.why {
+				t.Fatalf("pending with reason %v, want one: %v", why, c.why)
 			}
 		})
 	}

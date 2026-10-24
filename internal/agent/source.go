@@ -115,7 +115,8 @@ func (a *Agent) checkpoint(ctx context.Context, req api.CheckpointRequest, emit 
 	// and kubelet starts the container (lcm-runc then waits for READY), so kubelet's start-up
 	// latency (~1 s) overlaps the end of pre-copy and the final dump instead of following them.
 	// It goes out before the pre-dump round expected to finish within finalLead, or at the latest
-	// right before the freeze.
+	// right before the freeze, unless READY could then come later than lcm-runc waits for it (see
+	// finalBudget): the destination then starts the container on READY instead.
 	finalSent := false
 	var finalAt time.Time
 	sendFinal := func() error {
@@ -250,8 +251,18 @@ func (a *Agent) checkpoint(ctx context.Context, req api.CheckpointRequest, emit 
 	}
 	emit(api.Event{Phase: "freeze", Message: fmt.Sprintf("freezing the workload for the final dump after %d pre-copy round(s)%s",
 		len(res.PreDumps), lastRound(lastBytes))})
-	if err := sendFinal(); err != nil {
-		return nil, err
+	switch est := finalEstimate(final, prevRate); {
+	case !finalSent && est > finalBudget:
+		// A slow link or a large last round: skipping the overlap costs kubelet's start-up (~1 s)
+		// on top of a long blackout; a destination that gave up waiting costs kubelet's back-off.
+		emit(api.Event{Phase: "freeze", Message: fmt.Sprintf("the final dump and its transfer may take ~%s: the destination starts the container once it is staged, not before", est.Round(time.Second))})
+	case finalSent && time.Since(finalAt)+est > finalBudget:
+		emit(api.Event{Phase: "freeze", Message: fmt.Sprintf("warning: the destination was told %s ago that the final dump is near and it may take ~%s more: lcm-runc may give up waiting (kubelet then retries)",
+			time.Since(finalAt).Round(time.Second), est.Round(time.Second))})
+	default:
+		if err := sendFinal(); err != nil {
+			return nil, err
+		}
 	}
 	if req.Relay != "off" {
 		switch err := relayctl.Command(st.Pid, "quiesce", 10*time.Second); {
@@ -403,6 +414,21 @@ const shipDeadline = 90 * time.Second
 // finalLead: FINAL goes out before a pre-dump round expected to take at most this long (plus the
 // final dump). lcm-runc waits up to 100 s for READY, so a misestimate has a wide margin.
 const finalLead = 10 * time.Second
+
+// finalBudget: FINAL goes out right before the freeze only if READY is expected within this long
+// (the final dump and its transfer). lcm-runc waits about 100 s for READY, in a single CRI call it
+// can't stretch (see cmd/lcm-runc); the rest is margin for a misestimate.
+const finalBudget = 60 * time.Second
+
+// finalEstimate guesses how long the final dump of size bytes plus its transfer take: at the last
+// pre-dump round's throughput (dump + ship), or without one at roundEstimate's conservative
+// 50 MB/s. The writable layer (shipped after the images) is assumed small.
+func finalEstimate(size int64, rate float64) time.Duration {
+	if rate <= 0 {
+		rate = 50e6
+	}
+	return roundEstimate(2, -1, size, rate)
+}
 
 // roundEstimate guesses how long pre-dump round `round` plus the final dump will take: the
 // previous round's size at its throughput (rounds shrink as they converge), or for the first
@@ -563,7 +589,8 @@ func fileSize(p string) int64 {
 	return fi.Size()
 }
 
-// finalWait bounds pre-copy after FINAL: lcm-runc on the destination waits about 100 s for READY.
+// finalWait bounds pre-copy after FINAL: lcm-runc on the destination waits about 100 s for READY,
+// and the final dump and its transfer still follow (finalBudget).
 const finalWait = 30 * time.Second
 
 func lastRound(b int64) string {

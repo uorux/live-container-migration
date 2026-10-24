@@ -131,8 +131,12 @@ func main() {
 }
 
 // pendingTimeout bounds how long create waits for a final checkpoint that is being dumped and
-// shipped (FINAL is sent up to ~10 s of estimated work early); under the CRI runtime request
-// timeout (2 min).
+// shipped. It can't follow a slow transfer for longer: create runs inside kubelet's StartContainer
+// call, which times out after the CRI runtime request timeout (2 min), and the shim then kills
+// this process, possibly mid-restore, leaving a restored process containerd doesn't know about.
+// Instead the source signals FINAL only when READY is expected well within this (see
+// agent.finalBudget); when an attempt still gives up, kubelet's next one restores, and the CLI
+// waits for it (controller.checkRestore).
 const pendingTimeout = 100 * time.Second
 
 func create(inv invocation) {
@@ -173,7 +177,9 @@ func create(inv invocation) {
 		for stage.RestorePending(key) {
 			unlock()
 			if time.Now().After(deadline) {
-				msg := fmt.Sprintf("lcm: the final checkpoint for %s was not staged within %s; failing this attempt (kubelet retries)", key, pendingTimeout)
+				bytes, last := stage.Progress(key)
+				msg := fmt.Sprintf("lcm: the final checkpoint for %s was not staged within %s (%d MiB staged, last written %s ago); failing this attempt (kubelet retries)",
+					key, pendingTimeout, bytes>>20, time.Since(last).Round(time.Second))
 				logf("%s", msg)
 				fmt.Fprintln(os.Stderr, msg)
 				os.Exit(1)
