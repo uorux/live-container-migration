@@ -35,7 +35,7 @@ func TestHideGone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"pagemap-1.img", "pagemap-212.img.lcm-gone", "pagemap-shmem-7.img.lcm-gone", "pages-1.img", "pstree.img"}
+	want := []string{"lcm-gone-pagemap-212.img", "lcm-gone-pagemap-shmem-7.img", "pagemap-1.img", "pages-1.img", "pstree.img"}
 	if got := ls(); !slices.Equal(got, want) {
 		t.Fatalf("while hidden: %v, want %v", got, want)
 	}

@@ -56,7 +56,7 @@ func hideGone(dir string, log *slog.Logger) (unhide func(), err error) {
 	var hidden []string
 	unhide = func() {
 		for _, name := range hidden {
-			if err := os.Rename(filepath.Join(parent, name+hiddenSuffix), filepath.Join(parent, name)); err != nil {
+			if err := os.Rename(filepath.Join(parent, hiddenPrefix+name), filepath.Join(parent, name)); err != nil {
 				log.Warn("restoring a pagemap hidden from criu dedup", "err", err)
 			}
 		}
@@ -69,7 +69,7 @@ func hideGone(dir string, log *slog.Logger) (unhide func(), err error) {
 		if _, err := os.Lstat(filepath.Join(dir, name)); err == nil || !errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
-		if err := os.Rename(filepath.Join(parent, name), filepath.Join(parent, name+hiddenSuffix)); err != nil {
+		if err := os.Rename(filepath.Join(parent, name), filepath.Join(parent, hiddenPrefix+name)); err != nil {
 			unhide()
 			return nil, err
 		}
@@ -78,7 +78,9 @@ func hideGone(dir string, log *slog.Logger) (unhide func(), err error) {
 	return unhide, nil
 }
 
-const hiddenSuffix = ".lcm-gone"
+// A prefix, not a suffix: criu matches the names with sscanf("pagemap-%lu.img"), which ignores
+// anything after the pattern.
+const hiddenPrefix = "lcm-gone-"
 
 func lastLine(s string) string {
 	s = strings.TrimSpace(s)
