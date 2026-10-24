@@ -42,7 +42,12 @@ func runHook(ctx context.Context, agentURL, token string, pod *corev1.Pod, key, 
 	hctx, cancel := context.WithTimeout(ctx, hookTimeout+5*time.Second)
 	defer cancel()
 	if _, err := agentDo(hctx, agentURL, token, http.MethodPost, "/v1/exec", bytes.NewReader(body)); err != nil {
-		logf("warning: %s hook: %v", key, err)
+		// crictl's errors run to many lines (the agent logs them whole); its last line says why.
+		msg := strings.TrimSpace(err.Error())
+		if i := strings.LastIndexByte(msg, '\n'); i >= 0 {
+			msg = msg[i+1:]
+		}
+		logf("warning: %s hook: %s", key, msg)
 		return
 	}
 	logf("ran the %s hook", key)

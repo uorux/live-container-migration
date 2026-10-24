@@ -104,6 +104,8 @@ type MigrationReport struct {
 	SourceNode string    `json:"sourceNode"`
 	DestPod    string    `json:"destPod"`
 	DestNode   string    `json:"destNode"`
+	// TargetNode is where it was moving to: DestNode is the source node again after a rollback.
+	TargetNode string `json:"targetNode,omitempty"`
 	// Outcome: success, rolled_back (restore failed, workload back on the source node),
 	// aborted (failed before the source stopped; it kept running), failed (needs an operator).
 	Outcome    string  `json:"outcome"`
@@ -122,4 +124,15 @@ type ExecRequest struct {
 	Command    string            `json:"command"`
 	Env        map[string]string `json:"env,omitempty"` // exported before Command; names [A-Z_][A-Z0-9_]*
 	TimeoutSec int               `json:"timeoutSec,omitempty"`
+}
+
+// MemHeadroom is memory a destination keeps free beyond the staged images and the restored
+// process: the rest of the node keeps running, and a reclaim storm resets a VM via its watchdog.
+// An eighth of the node's RAM, at most 3 GiB (3 GiB when the node doesn't report its size). The
+// source agent checks it before each pre-copy round and the freeze; the CLI before starting.
+func MemHeadroom(total int64) int64 {
+	if total <= 0 {
+		return 3 << 30
+	}
+	return min(total/8, 3<<30)
 }

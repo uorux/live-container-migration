@@ -47,3 +47,27 @@ func TestReclaimStaging(t *testing.T) {
 		}
 	}
 }
+
+func TestPruneLogs(t *testing.T) {
+	root := t.TempDir()
+	now := time.Now()
+	mk := func(name string, age time.Duration, size int) {
+		d := filepath.Join(root, name)
+		os.MkdirAll(d, 0o755)
+		os.WriteFile(filepath.Join(d, "dump.log"), make([]byte, size), 0o644)
+		os.Chtimes(d, now.Add(-age), now.Add(-age))
+	}
+	mk("m1", 1*time.Hour, 100)    // newest
+	mk("m2", 2*time.Hour, 100)    // kept: within keep
+	mk("m3", 3*time.Hour, 100)    // kept: total 300 <= 350
+	mk("m4", 4*time.Hour, 100)    // total 400 > 350: removed
+	mk("m5", 40*24*time.Hour, 10) // too old: removed
+	if n := pruneLogs(root, 350, 2, 30*24*time.Hour); n != 2 {
+		t.Fatalf("removed %d, want 2", n)
+	}
+	for name, want := range map[string]bool{"m1": true, "m2": true, "m3": true, "m4": false, "m5": false} {
+		if _, err := os.Stat(filepath.Join(root, name)); (err == nil) != want {
+			t.Errorf("%s exists=%v, want %v", name, err == nil, want)
+		}
+	}
+}

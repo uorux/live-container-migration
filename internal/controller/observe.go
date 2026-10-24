@@ -19,7 +19,7 @@ import (
 
 // NewReport summarises a finished Migrate call for metrics and `lcm history`.
 func NewReport(o Options, res *Result, err error, took time.Duration) api.MigrationReport {
-	rep := api.MigrationReport{Time: time.Now(), Namespace: o.Namespace, SourcePod: o.Pod, DestNode: o.TargetNode, TotalMS: took.Milliseconds()}
+	rep := api.MigrationReport{Time: time.Now(), Namespace: o.Namespace, SourcePod: o.Pod, DestNode: o.TargetNode, TargetNode: o.TargetNode, TotalMS: took.Milliseconds()}
 	if res != nil {
 		rep.ID, rep.SourcePod, rep.SourceNode, rep.DestPod, rep.DestNode = res.MigrationID, res.SourcePod, res.SourceNode, res.DestPod, res.DestNode
 		rep.BlackoutMS = res.Blackout.Milliseconds()

@@ -109,6 +109,9 @@ func (a *Agent) GC(ctx context.Context, maxAge time.Duration) {
 					os.Remove(f)
 				}
 			}
+			if n := pruneLogs(filepath.Join(stage.Root(), "logs"), logsMaxBytes, logsKeep, logsMaxAge); n > 0 {
+				a.log.Info("pruned old migration logs", "dirs", n)
+			}
 		}
 		a.reclaimStaging()
 		select {
