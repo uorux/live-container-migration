@@ -1,0 +1,136 @@
+# The VPS ingresses aeon (15.204.121.118) and type-6a (74.208.45.181, mc-proxy.rooty.dev):
+# host metrics, HAProxy, and outside-in Minecraft probes. Exporters listen on the boxes'
+# tailnet addresses only (live-container-migration deploy/standalone); scrapes leave the cluster
+# from a node, so the tailnet policy allows the nodes -> boxes on tcp 9100, 9115 and 8405.
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMStaticScrape
+metadata:
+  name: ingress-node-exporter
+  namespace: monitoring
+spec:
+  jobName: ingress-node
+  targetEndpoints:
+  - targets: ["100.125.234.26:9100"]
+    labels: {instance: aeon}
+    interval: 30s
+  - targets: ["100.92.154.30:9100"]
+    labels: {instance: type-6a}
+    interval: 30s
+---
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMStaticScrape
+metadata:
+  name: ingress-haproxy
+  namespace: monitoring
+spec:
+  jobName: haproxy
+  targetEndpoints:
+  - targets: ["100.125.234.26:8405"]
+    labels: {instance: aeon}
+    path: /metrics
+    interval: 30s
+  - targets: ["100.92.154.30:8405"]
+    labels: {instance: type-6a}
+    path: /metrics
+    interval: 30s
+---
+# Minecraft status pings from outside the home network, through the internet, to every entry
+# point: the router path (mc.rooty.dev, 71.34.78.8) from both boxes, and each box from the other.
+# A status ping never wakes a server (the gateway answers it). Module minecraft_status is in
+# each box's blackbox config.
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMProbe
+metadata:
+  name: minecraft-ingress-from-aeon
+  namespace: monitoring
+spec:
+  jobName: minecraft-ingress
+  interval: 60s
+  module: minecraft_status
+  vmProberSpec:
+    url: 100.125.234.26:9115
+  targets:
+    staticConfig:
+      targets: ["71.34.78.8:25565", "74.208.45.181:25565"]
+      labels: {prober: aeon}
+  relabelConfigs:
+  - sourceLabels: [__param_target]
+    regex: "71\\.34\\.78\\.8:25565"
+    targetLabel: entry
+    replacement: router
+  - sourceLabels: [__param_target]
+    regex: "74\\.208\\.45\\.181:25565"
+    targetLabel: entry
+    replacement: type-6a
+---
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMProbe
+metadata:
+  name: minecraft-ingress-from-type-6a
+  namespace: monitoring
+spec:
+  jobName: minecraft-ingress
+  interval: 60s
+  module: minecraft_status
+  vmProberSpec:
+    url: 100.92.154.30:9115
+  targets:
+    staticConfig:
+      targets: ["71.34.78.8:25565", "15.204.121.118:25565"]
+      labels: {prober: type-6a}
+  relabelConfigs:
+  - sourceLabels: [__param_target]
+    regex: "71\\.34\\.78\\.8:25565"
+    targetLabel: entry
+    replacement: router
+  - sourceLabels: [__param_target]
+    regex: "15\\.204\\.121\\.118:25565"
+    targetLabel: entry
+    replacement: aeon
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: ingress-alerts
+  namespace: monitoring
+  labels: {release: prometheus}
+spec:
+  groups:
+  - name: ingress.rules
+    rules:
+    - alert: MinecraftEntryPointDown
+      # Failing from every box that probes it, so it's the entry point, not one prober.
+      expr: max by (entry) (probe_success{job="minecraft-ingress"}) == 0
+      for: 3m
+      labels: {severity: critical}
+      annotations:
+        summary: "Minecraft entry point {{ $labels.entry }} doesn't answer from outside"
+        description: "Status pings from the internet get no reply. router: the port-forward to 10.0.0.250 or the VIP gateway (lcm_gateway_vip_active). aeon/type-6a: HAProxy's mc frontend or lcm-gateway on that box (systemctl status lcm-gateway haproxy)."
+    - alert: IngressExporterDown
+      expr: up{job=~"ingress-node|haproxy"} == 0 or up{job="minecraft-ingress"} == 0
+      for: 5m
+      labels: {severity: warning}
+      annotations:
+        summary: "{{ $labels.job }} on {{ $labels.instance }} isn't being scraped"
+        description: "The box is down, off the tailnet, or the exporter stopped (systemctl status ingress-node-exporter ingress-blackbox-exporter haproxy)."
+    - alert: IngressHAProxyBackendDown
+      expr: haproxy_backend_active_servers{job="haproxy", proxy=~"bk_http|bk_https"} == 0
+      for: 2m
+      labels: {severity: critical}
+      annotations:
+        summary: "HAProxy on {{ $labels.instance }}: {{ $labels.proxy }} has no healthy server"
+        description: "Web traffic through this box fails: svc:k8s (100.67.22.237) is unreachable from it, or Traefik refuses its health checks."
+    - alert: IngressHostDiskFull
+      expr: node_filesystem_avail_bytes{job="ingress-node", mountpoint="/"} / node_filesystem_size_bytes{job="ingress-node", mountpoint="/"} < 0.10
+      for: 15m
+      labels: {severity: warning}
+      annotations:
+        summary: "{{ $labels.instance }}: / is {{ $value | humanizePercentage }} free"
+        description: "journald and Vector's 256 MiB buffer live here."
+    - alert: IngressHostLowMemory
+      expr: node_memory_MemAvailable_bytes{job="ingress-node"} / node_memory_MemTotal_bytes{job="ingress-node"} < 0.10
+      for: 10m
+      labels: {severity: warning}
+      annotations:
+        summary: "{{ $labels.instance }} has {{ $value | humanizePercentage }} memory available"
+        description: "type-6a has 642 MB in total. lcm-gateway holds up to ~2 MiB per player while a server migrates; HAProxy, Vector (capped at 128M) and the exporters share the rest."

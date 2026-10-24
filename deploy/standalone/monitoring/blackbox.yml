@@ -1,0 +1,12 @@
+modules:
+  # A Minecraft server-list ping: handshake (protocol 47, host mc.rooty.dev, intent status),
+  # status request, ping; expects the status JSON. Every byte is < 0x80 so YAML passes it as is.
+  # A status ping never wakes a sleeping server: the gateway answers it itself.
+  minecraft_status:
+    prober: tcp
+    timeout: 8s
+    tcp:
+      preferred_ip_protocol: ip4
+      query_response:
+        - send: "\x12\x00\x2f\x0cmc.rooty.dev\x63\x63\x01\x01\x00\x09\x01\x00\x00\x00\x00\x00\x00\x00\x00"
+        - expect: "\"version\""

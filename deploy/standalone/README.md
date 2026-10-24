@@ -93,3 +93,20 @@ the start).
 
 `journalctl -u lcm-gateway`. The gateway logs player source addresses on connect: keep journald
 retention bounded (`SystemMaxUse=`).
+
+## Host monitoring and log shipping
+
+`monitoring/install-monitoring.sh` (as root, from a copy of `monitoring/` at
+`/tmp/lcm-deploy/mon`) installs, from pinned upstream releases checked against their checksums:
+
+- node_exporter on `<tailnet-ip>:9100`;
+- blackbox_exporter on `<tailnet-ip>:9115`, with module `minecraft_status` (a server-list ping
+  that never wakes anything), which VictoriaMetrics uses to probe every entry point from outside;
+- Vector, shipping this box's journal (lcm-gateway included) to VictoriaLogs through the
+  insert-only `https://logs-ingest.k8s.rooty.dev/insert/jsonline` (homelab `apps/infra/logs`);
+  memory-capped at 128M, and it starts from "now" (no backfill);
+- HAProxy's Prometheus endpoint on `:8405`, refusing everything but the tailnet and loopback.
+
+The homelab side is `deploy/homelab/monitoring/ingress-monitoring.yaml` (scrapes, probes,
+alerts) and `deploy/homelab/logs/ingest.yaml`. The tailnet policy must let the k3s nodes reach
+the boxes on tcp 9100, 9115 and 8405.

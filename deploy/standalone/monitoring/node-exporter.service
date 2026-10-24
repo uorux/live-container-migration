@@ -1,0 +1,17 @@
+[Unit]
+Description=Prometheus node_exporter (tailnet only)
+Wants=network-online.target
+After=network-online.target tailscaled.service
+
+[Service]
+ExecStart=/opt/ingress-monitoring/node_exporter --web.listen-address=@TS@:9100 --collector.systemd
+Restart=always
+RestartSec=5
+DynamicUser=yes
+ProtectSystem=strict
+ProtectHome=read-only
+NoNewPrivileges=yes
+MemoryMax=64M
+
+[Install]
+WantedBy=multi-user.target

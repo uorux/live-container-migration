@@ -1,0 +1,17 @@
+[Unit]
+Description=Prometheus blackbox_exporter: outside-in probes of the Minecraft entry points (tailnet only)
+Wants=network-online.target
+After=network-online.target tailscaled.service
+
+[Service]
+ExecStart=/opt/ingress-monitoring/blackbox_exporter --config.file=/etc/ingress-monitoring/blackbox.yml --web.listen-address=@TS@:9115
+Restart=always
+RestartSec=5
+DynamicUser=yes
+ProtectSystem=strict
+ProtectHome=yes
+NoNewPrivileges=yes
+MemoryMax=64M
+
+[Install]
+WantedBy=multi-user.target

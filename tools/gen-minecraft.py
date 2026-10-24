@@ -278,6 +278,14 @@ STATIC = {
               "labels": {"severity": "info", "channel": "discord-mc"},
               "annotations": {"summary": "Minecraft player online",
                               "description": "{{ $labels.name }} is online on {{ $labels.server }}."}},
+             # recusant's MinecraftLowTPS read mc_tps, which the exporter (1.2.1) doesn't have, so
+             # it never fired: TPS from the mean tick time instead (66 ms per tick = 15 TPS).
+             {"alert": "MinecraftLowTPS",
+              "expr": 'clamp_max(1 / (rate(mc_server_tick_seconds_sum{job="minecraft-mc-exporter"}[5m]) / rate(mc_server_tick_seconds_count{job="minecraft-mc-exporter"}[5m])), 20) < 15',
+              "for": "5m",
+              "labels": {"severity": "warning"},
+              "annotations": {"summary": "{{ $labels.server }} is at {{ $value | printf \"%.1f\" }} TPS",
+                              "description": "Mean tick time over 66 ms for 5 minutes. Check the pack's entities and chunks (modded dashboard) and node CPU."}},
              {"alert": "McVolumeFull",
               "expr": 'kubelet_volume_stats_used_bytes{namespace="minecraft"} / kubelet_volume_stats_capacity_bytes{namespace="minecraft"} > 0.85',
               "for": "15m",

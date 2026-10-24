@@ -1,0 +1,21 @@
+[Unit]
+Description=Vector: ship this box's journal to VictoriaLogs
+Wants=network-online.target
+After=network-online.target tailscaled.service
+
+[Service]
+ExecStart=/opt/ingress-monitoring/vector --config /etc/ingress-monitoring/vector.yaml
+Restart=always
+RestartSec=10
+DynamicUser=yes
+SupplementaryGroups=systemd-journal
+StateDirectory=ingress-vector
+ProtectSystem=strict
+ProtectHome=yes
+NoNewPrivileges=yes
+# type-6a has 642 MB of RAM.
+MemoryHigh=96M
+MemoryMax=128M
+
+[Install]
+WantedBy=multi-user.target

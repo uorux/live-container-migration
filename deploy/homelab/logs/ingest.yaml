@@ -1,0 +1,34 @@
+# Insert-only VictoriaLogs ingest for hosts outside the cluster on the tailnet: the VPS ingresses'
+# Vector (live-container-migration deploy/standalone) posts to
+# https://logs-ingest.k8s.rooty.dev/insert/jsonline (*.k8s.rooty.dev is svc:k8s's tailnet
+# address). Tailnet clients reach Traefik through svc:k8s, which re-opens each connection from a
+# node's cilium_host address, so only those sources are allowed; traffic arriving through the
+# VPS HAProxy carries the real client address (PROXY protocol, #391) and is refused. Queries
+# stay behind Authelia (ingress.yaml).
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: tailnet-only
+  namespace: logs
+spec:
+  ipAllowList:
+    sourceRange: ["10.42.0.205/32", "10.42.2.167/32", "10.42.3.109/32"]
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: victoria-logs-ingest
+  namespace: logs
+spec:
+  routes:
+    - match: Host(`logs-ingest.k8s.rooty.dev`) && PathPrefix(`/insert/`)
+      kind: Rule
+      middlewares:
+        - name: tailnet-only
+      services:
+        - name: victoria-logs
+          port: 9428
+  tls:
+    store:
+      name: default
+      namespace: kube-system
