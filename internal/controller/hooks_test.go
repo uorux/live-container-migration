@@ -48,7 +48,7 @@ func TestRunHook(t *testing.T) {
 	// A failing hook is a warning, not an error (runHook returns nothing to fail with).
 	pod.Annotations[PostMigrateAnnotation] = "fail"
 	runHook(context.Background(), srv.URL, "tok", pod, PostMigrateAnnotation, "ctr2", nil, logf)
-	if len(logs) == 0 || logs[len(logs)-1] != "warning: %s hook: %v" {
+	if len(logs) == 0 || logs[len(logs)-1] != "warning: %s hook: %s" {
 		t.Errorf("logs %v", logs)
 	}
 	if trimRuntime("containerd://abc") != "abc" || trimRuntime("abc") != "abc" {

@@ -145,7 +145,7 @@ func (a *Agent) checkpoint(ctx context.Context, req api.CheckpointRequest, emit 
 		}
 		return max(anon, 0)
 	}
-	headroom := memHeadroom(dst.memTotal(ctx))
+	headroom := api.MemHeadroom(dst.memTotal(ctx))
 	// The destination's memory and staging space are checked right before the freeze. If it
 	// answered now, a failed answer then is suspect: don't freeze on a missing check.
 	memKnown, stagingKnown := dst.memAvailable(ctx) >= 0, dst.stagingFree(ctx) >= 0
@@ -561,16 +561,6 @@ func fileSize(p string) int64 {
 		return 0
 	}
 	return fi.Size()
-}
-
-// memHeadroom is memory left free on the destination beyond the staged images and the restored
-// process: the rest of the node keeps running, and a reclaim storm resets a VM via its watchdog.
-// An eighth of the node's RAM, at most 3 GiB (3 GiB when the node doesn't report its size).
-func memHeadroom(total int64) int64 {
-	if total <= 0 {
-		return 3 << 30
-	}
-	return min(total/8, 3<<30)
 }
 
 // finalWait bounds pre-copy after FINAL: lcm-runc on the destination waits about 100 s for READY.

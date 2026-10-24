@@ -1,8 +1,10 @@
 package agent
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -66,4 +68,57 @@ func lazyDaemonAlive(pidFile string) bool {
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
 	return err == nil && pid > 0 && syscall.Kill(pid, 0) == nil
+}
+
+// CRIU's logs of each migration (kept for debugging, see keepLogs) run to tens of MB per GB of
+// workload, on the node's disk: keep the newest logsKeep migrations' always, and older ones
+// only while all of them fit in logsMaxBytes and are younger than logsMaxAge.
+const (
+	logsMaxBytes = 512 << 20
+	logsKeep     = 5
+	logsMaxAge   = 30 * 24 * time.Hour
+)
+
+// pruneLogs deletes the oldest per-migration directories under root beyond those limits and
+// returns how many it deleted.
+func pruneLogs(root string, maxBytes int64, keep int, maxAge time.Duration) int {
+	ents, err := os.ReadDir(root)
+	if err != nil {
+		return 0
+	}
+	type logDir struct {
+		path string
+		mod  time.Time
+		size int64
+	}
+	var dirs []logDir
+	for _, e := range ents {
+		fi, err := e.Info()
+		if err != nil || !e.IsDir() {
+			continue
+		}
+		d := logDir{path: filepath.Join(root, e.Name()), mod: fi.ModTime()}
+		filepath.WalkDir(d.path, func(_ string, f fs.DirEntry, err error) error {
+			if err == nil && f.Type().IsRegular() {
+				if i, err := f.Info(); err == nil {
+					d.size += i.Size()
+				}
+			}
+			return nil
+		})
+		dirs = append(dirs, d)
+	}
+	slices.SortFunc(dirs, func(a, b logDir) int { return b.mod.Compare(a.mod) }) // newest first
+	var total int64
+	removed := 0
+	for i, d := range dirs {
+		total += d.size
+		if i < keep || (total <= maxBytes && time.Since(d.mod) < maxAge) {
+			continue
+		}
+		if os.RemoveAll(d.path) == nil {
+			removed++
+		}
+	}
+	return removed
 }

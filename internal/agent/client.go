@@ -16,9 +16,11 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
+	"golang.org/x/sys/unix"
 )
 
 // stagingClient ships image dirs from the source agent to the destination agent. Bodies are
@@ -85,14 +87,34 @@ var shipClient = newShipClient(nil)
 // side) is used for https:// URLs.
 func newShipClient(tlsConf *tls.Config) *http.Client {
 	return &http.Client{Transport: &http.Transport{
-		DialContext:         (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 15 * time.Second}).DialContext,
+		DialContext:         (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 15 * time.Second, Control: userTimeout}).DialContext,
 		TLSClientConfig:     tlsConf,
 		TLSHandshakeTimeout: 5 * time.Second,
+		// A pooled connection whose peer vanished (a firewall started dropping, the node went
+		// away) otherwise hangs the next transfer for minutes: in the lab, 2m20s, longer than the
+		// retries after the freeze allow.
+		IdleConnTimeout:     30 * time.Second,
 		MaxIdleConnsPerHost: 4,
 		WriteBufferSize:     1 << 20,
 		ReadBufferSize:      64 << 10,
 	}}
 }
+
+// userTimeout makes the kernel drop a connection whose sent data (or keepalive probes) go
+// unacknowledged for shipStallTimeout, so a dead peer fails a transfer in seconds instead of
+// after TCP's ~15 minutes of retransmits. A busy but healthy receiver still acknowledges.
+func userTimeout(_, _ string, c syscall.RawConn) error {
+	var serr error
+	err := c.Control(func(fd uintptr) {
+		serr = unix.SetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_USER_TIMEOUT, int(shipStallTimeout.Milliseconds()))
+	})
+	if err != nil {
+		return err
+	}
+	return serr
+}
+
+const shipStallTimeout = 30 * time.Second
 
 // stagingClient returns a client shipping to the agent at base under key.
 func (a *Agent) stagingClient(base, key string) *stagingClient {

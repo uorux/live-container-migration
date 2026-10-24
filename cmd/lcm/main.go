@@ -133,8 +133,12 @@ func main() {
 			return
 		}
 		for _, r := range reps {
-			line := fmt.Sprintf("%s %-11s %s/%s %s -> %s/%s blackout=%s total=%s", r.Time.Local().Format("01-02 15:04:05"), r.Outcome,
-				r.Namespace, r.SourcePod, r.SourceNode, r.DestNode, r.DestPod,
+			to := r.DestNode + "/" + r.DestPod
+			if r.Outcome == "rolled_back" && r.TargetNode != "" {
+				to = r.TargetNode + ", back on " + to
+			}
+			line := fmt.Sprintf("%s %-11s %s/%s %s -> %s blackout=%s total=%s", r.Time.Local().Format("01-02 15:04:05"), r.Outcome,
+				r.Namespace, r.SourcePod, r.SourceNode, to,
 				time.Duration(r.BlackoutMS)*time.Millisecond, time.Duration(r.TotalMS)*time.Millisecond)
 			if r.Error != "" {
 				line += "\n    " + r.Error

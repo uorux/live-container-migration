@@ -232,6 +232,8 @@ func Migrate(ctx context.Context, kc kubernetes.Interface, o Options) (*Result, 
 	// 3. Wait for the restored container. If the restore fails, the source is already gone:
 	// roll back by restoring the same images in a new pod on the source node.
 	rolledBack := false
+	staged := time.Now() // the checkpoint stream ends once the destination acknowledged READY
+	var rollbackWait time.Duration
 	if err := waitRestored(ctx, kc, o.Namespace, res.DestPod, ctrName); err != nil {
 		logf("restore on %s failed: %v", o.TargetNode, err)
 		// kubelet retries failed containers on its own, and a retry may restore fine. Fence the
@@ -255,6 +257,7 @@ func Migrate(ctx context.Context, kc kubernetes.Interface, o Options) (*Result, 
 			return res, fmt.Errorf("restore on %s failed (%v) and rollback failed: %w; images are still staged on %s under /var/lib/lcm/restore/%s",
 				o.TargetNode, err, rerr, o.TargetNode, key)
 		}
+		rollbackWait = time.Since(staged)
 		logf("rolled back: workload restored on %s as %s", rb.DestNode, rb.DestPod)
 		res.DestPod, res.DestNode, key, dstURL, rolledBack = rb.DestPod, rb.DestNode, rb.key, srcURL, true
 		res.RolledBack = true
@@ -270,6 +273,11 @@ restored:
 			res.Restore = &rr
 			res.Blackout = blackout(ck, &rr)
 		}
+	}
+	if rolledBack && ck != nil && ck.FrozenMS > 0 {
+		// The rollback's own READY-to-restored misses the failed attempt, the fencing, the new pod
+		// and the forward: freeze to READY (source clock) plus READY to rolled back (this clock).
+		res.Blackout = time.Duration(ck.FrozenMS)*time.Millisecond + rollbackWait
 	}
 	logf("restored on %s: restore %dms, relay resume %q, blackout %s", res.DestNode, rr.RestoreMS, rr.RelayResume, res.Blackout.Round(time.Millisecond))
 	result := "done"
@@ -410,9 +418,11 @@ type agentInfo struct {
 	MemAvailable  int64    `json:"memAvailable"`
 	StagingFree   int64    `json:"stagingFree"`
 	ContainerAnon int64    `json:"containerAnon"`
+	MemTotal      int64    `json:"memTotal"`
 }
 
-const memHeadroom = 512 << 20
+// srcHeadroom is what the source keeps free while it holds a pre-dump until it's shipped.
+const srcHeadroom = 512 << 20
 
 // checkMemory refuses a migration the nodes can't hold in RAM: checkpoint images are staged on
 // tmpfs, outside Kubernetes' accounting. The source holds up to one full pre-dump before it is
@@ -439,11 +449,13 @@ func checkMemory(ctx context.Context, token, srcURL, dstURL, ctrID string, logf 
 	}
 	need := src.ContainerAnon
 	var problems []string
-	if src.MemAvailable > 0 && src.MemAvailable < need+memHeadroom {
-		problems = append(problems, fmt.Sprintf("the source node has %s available, needs ~%s for the first pre-dump", human(src.MemAvailable), human(need+memHeadroom)))
+	if src.MemAvailable > 0 && src.MemAvailable < need+srcHeadroom {
+		problems = append(problems, fmt.Sprintf("the source node has %s available, needs ~%s for the first pre-dump", human(src.MemAvailable), human(need+srcHeadroom)))
 	}
-	if dst.MemAvailable < 2*need+memHeadroom {
-		problems = append(problems, fmt.Sprintf("the destination node has %s available, needs ~%s (staged images + the restored process)", human(dst.MemAvailable), human(2*need+memHeadroom)))
+	// The same headroom the source agent insists on before it freezes the workload: checking
+	// less here only wastes a whole pre-copy before the agent refuses.
+	if dstNeed := 2*need + api.MemHeadroom(dst.MemTotal); dst.MemAvailable < dstNeed {
+		problems = append(problems, fmt.Sprintf("the destination node has %s available, needs ~%s (staged images + the restored process + headroom)", human(dst.MemAvailable), human(dstNeed)))
 	}
 	if dst.StagingFree > 0 && dst.StagingFree < need+need/10 {
 		problems = append(problems, fmt.Sprintf("the destination's staging tmpfs has %s free, needs ~%s (services.lcm.stagingSize)", human(dst.StagingFree), human(need+need/10)))
