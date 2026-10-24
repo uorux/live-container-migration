@@ -1,0 +1,59 @@
+# Lab Ceph cluster, mirroring the homelab's (apps/infra/rook/rook-ceph-cluster.yaml, chart 1.20.9):
+# same Ceph image, 3 mons, an OSD per node, CephFS with a hot standby MDS, pod network. Smaller
+# resources so it fits 12 GB VMs; no object store, dashboard or monitoring.
+operatorNamespace: rook-ceph
+cephImage: {repository: quay.io/ceph/ceph, tag: v19.2.7-20261009}
+toolbox: {enabled: true}
+monitoring: {enabled: false}
+cephClusterSpec:
+  mon: {count: 3, allowMultiplePerNode: false}
+  mgr: {count: 1, allowMultiplePerNode: false, modules: [{name: rook, enabled: false}]}
+  dashboard: {enabled: false}
+  storage:
+    useAllNodes: false
+    useAllDevices: false
+    nodes:
+      - {name: node1, devices: [{name: /dev/vdb}]}
+      - {name: node2, devices: [{name: /dev/vdb}]}
+      - {name: node3, devices: [{name: /dev/vdb}]}
+  cephConfig:
+    global: {mon_max_pg_per_osd: "500"}
+    osd: {osd_memory_target: "1073741824"}
+  resources:
+    mgr: {requests: {cpu: 100m, memory: 256Mi}, limits: {memory: 1Gi}}
+    mon: {requests: {cpu: 100m, memory: 256Mi}, limits: {memory: 1Gi}}
+    osd: {requests: {cpu: 200m, memory: 512Mi}, limits: {memory: 2Gi}}
+    crashcollector: {requests: {cpu: 10m, memory: 32Mi}, limits: {memory: 64Mi}}
+    exporter: {requests: {cpu: 10m, memory: 32Mi}, limits: {memory: 128Mi}}
+    cleanup: {requests: {cpu: 10m, memory: 32Mi}}
+    prepareosd: {requests: {cpu: 100m, memory: 128Mi}}
+cephBlockPools: []
+cephObjectStores: []
+cephFileSystems:
+  - name: ceph-filesystem
+    spec:
+      metadataPool: {replicated: {size: 3}}
+      dataPools: [{failureDomain: host, replicated: {size: 3}, name: data0}]
+      metadataServer:
+        activeCount: 1
+        activeStandby: true
+        resources: {requests: {cpu: 100m, memory: 256Mi}, limits: {memory: 1Gi}}
+        priorityClassName: system-cluster-critical
+    storageClass:
+      enabled: true
+      isDefault: false
+      name: ceph-filesystem
+      pool: data0
+      reclaimPolicy: Delete
+      allowVolumeExpansion: true
+      volumeBindingMode: Immediate
+      parameters:
+        csi.storage.k8s.io/provisioner-secret-name: rook-csi-cephfs-provisioner
+        csi.storage.k8s.io/provisioner-secret-namespace: "{{ .Release.Namespace }}"
+        csi.storage.k8s.io/controller-expand-secret-name: rook-csi-cephfs-provisioner
+        csi.storage.k8s.io/controller-expand-secret-namespace: "{{ .Release.Namespace }}"
+        csi.storage.k8s.io/controller-publish-secret-name: rook-csi-cephfs-provisioner
+        csi.storage.k8s.io/controller-publish-secret-namespace: "{{ .Release.Namespace }}"
+        csi.storage.k8s.io/node-stage-secret-name: rook-csi-cephfs-node
+        csi.storage.k8s.io/node-stage-secret-namespace: "{{ .Release.Namespace }}"
+        csi.storage.k8s.io/fstype: ext4

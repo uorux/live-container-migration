@@ -1,0 +1,7 @@
+# Step 1 of the Ceph-on-LAN rehearsal: msgr2-only with encryption (secure mode) on the existing
+# pod-network cluster. Rook's docs: msgr v1 clients are disconnected the moment this applies.
+cephClusterSpec:
+  network:
+    connections:
+      encryption: {enabled: true}
+      requireMsgr2: true

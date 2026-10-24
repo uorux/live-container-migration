@@ -42,9 +42,11 @@ in
     boot.kernelModules = [ "inet_diag" "tcp_diag" "udp_diag" "unix_diag" "netlink_diag" "packet_diag" "nf_tables" "br_netfilter" ];
 
     virtualisation = {
-      memorySize = 6144;
+      memorySize = 12288; # room for a Rook mon/mgr/OSD/MDS per node next to the test workloads
       cores = 4;
       diskSize = 40960;
+      # /dev/vdb: a raw disk for a Rook OSD (Ceph rehearsals). Recreated empty at every VM start.
+      emptyDiskImages = [ 20480 ];
       graphics = false;
       writableStoreUseTmpfs = false;
       forwardPorts = [{ from = "host"; host.address = "127.0.0.1"; host.port = cfg.sshPort; guest.port = 22; }];

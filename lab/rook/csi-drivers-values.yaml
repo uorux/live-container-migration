@@ -1,0 +1,22 @@
+# Lab ceph-csi drivers, mirroring the homelab's (apps/infra/rook/ceph-csi-drivers.yaml, chart 1.0.4).
+operatorConfig:
+  namespace: rook-ceph
+  driverSpecDefaults:
+    imageSet: {name: rook-csi-operator-image-set-configmap}
+    clusterName: rook-ceph
+    log: {verbosity: 0, rotation: {enabled: false}}
+drivers:
+  rbd:
+    enabled: true
+    name: rook-ceph.rbd.csi.ceph.com
+    clusterName: rook-ceph
+    imageSet: {name: rook-csi-operator-image-set-configmap}
+    controllerPlugin: {replicas: 1, hostNetwork: false}
+  cephfs:
+    enabled: true
+    name: rook-ceph.cephfs.csi.ceph.com
+    clusterName: rook-ceph
+    imageSet: {name: rook-csi-operator-image-set-configmap}
+    controllerPlugin: {replicas: 1, hostNetwork: false}
+  nfs: {enabled: false, name: rook-ceph.nfs.csi.ceph.com}
+  nvmeof: {enabled: false, name: rook-ceph.nvmeof.csi.ceph.com}

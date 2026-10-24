@@ -1,0 +1,44 @@
+# CephFS stall detector for network-change rehearsals: appends and fsyncs a timestamped record
+# every 200 ms, logs any write that takes over 0.5 s (and every error), and reports totals on
+# SIGTERM. `kubectl logs` shows the stalls; /data/log.txt holds every record for verification.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: cephfs-writer, namespace: default}
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: ceph-filesystem
+  resources: {requests: {storage: 2Gi}}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: cephfs-writer, namespace: default}
+spec:
+  nodeName: node2
+  terminationGracePeriodSeconds: 5
+  containers:
+  - name: w
+    image: docker.io/library/python:3.13-alpine
+    command: ["python3", "-u", "-c"]
+    args:
+    - |
+      import os, time, signal, sys
+      n = slow = errs = 0; worst = 0.0
+      def bye(*_):
+          print(f"END records={n} slow={slow} errors={errs} worst={worst:.2f}s", flush=True); sys.exit(0)
+      signal.signal(signal.SIGTERM, bye)
+      print("start", time.strftime("%H:%M:%S"), flush=True)
+      while True:
+          t0 = time.time()
+          try:
+              with open("/data/log.txt", "a") as f:
+                  f.write(f"{n} {t0:.3f}\n"); f.flush(); os.fsync(f.fileno())
+              n += 1
+          except OSError as e:
+              errs += 1; print(time.strftime("%H:%M:%S"), "ERROR", e, flush=True)
+          dt = time.time() - t0; worst = max(worst, dt)
+          if dt > 0.5:
+              slow += 1; print(time.strftime("%H:%M:%S"), f"slow write {dt:.2f}s (record {n})", flush=True)
+          if n % 300 == 0: print(time.strftime("%H:%M:%S"), f"ok records={n} worst={worst:.2f}s", flush=True)
+          time.sleep(max(0, 0.2 - dt))
+    volumeMounts: [{name: d, mountPath: /data}]
+  volumes: [{name: d, persistentVolumeClaim: {claimName: cephfs-writer}}]

@@ -1,0 +1,15 @@
+# Step 2: Ceph daemons on host networking, bound to the "LAN" (192.168.200.0/24 on eth1 in the lab,
+# 10.0.0.0/24 on enp0s7 in production), while the nodes' InternalIPs stay on the tunnel. Mons pick
+# their address from the node annotation network.rook.io/mon-ip and move only when failed over.
+cephClusterSpec:
+  network:
+    provider: host
+    addressRanges:
+      public: ["192.168.200.0/24"]
+      cluster: ["192.168.200.0/24"]
+    connections:
+      encryption: {enabled: true}
+      requireMsgr2: true
+  healthCheck:
+    daemonHealth:
+      mon: {interval: 30s, timeout: 60s}
