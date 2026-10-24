@@ -492,7 +492,9 @@ func (a *Agent) handleForward(w http.ResponseWriter, r *http.Request) {
 	for _, e := range entries {
 		name := e.Name()
 		switch {
-		case name == "work" || name == "result.json" || strings.HasPrefix(name, "READY"):
+		// Not FINAL either: the receiving pod would leave its wait init container while the images
+		// are still in transit, and lcm-runc waits for them only so long.
+		case name == "work" || name == "result.json" || name == "FINAL" || strings.HasPrefix(name, "READY"):
 			continue
 		case e.IsDir():
 			err = dst.putDir(ctx, filepath.Join(dir, name), name)

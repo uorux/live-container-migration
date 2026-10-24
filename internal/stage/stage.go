@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // Root is the node-local state directory. Overridable for tests via LCM_STATE_DIR.
@@ -71,6 +72,24 @@ func RestorePending(k Key) bool {
 	}
 	_, err := os.Stat(FinalFile(k))
 	return err == nil
+}
+
+// Progress sums the sizes of what is staged for k so far and finds when it was last written to,
+// for reporting a staging that is still arriving.
+func Progress(k Key) (bytes int64, last time.Time) {
+	filepath.Walk(RestoreDir(k), func(_ string, fi os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if fi.Mode().IsRegular() {
+			bytes += fi.Size()
+		}
+		if fi.ModTime().After(last) {
+			last = fi.ModTime()
+		}
+		return nil
+	})
+	return bytes, last
 }
 
 // ConsumedFile is a persistent (on-disk, survives reboots) tombstone that the restore for key

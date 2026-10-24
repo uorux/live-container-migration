@@ -169,7 +169,11 @@ pre-dumps. To resolve it on the source node:
   restore (each first open from a new node used to cost ~100 ms on NFS).
 - Just before the final dump the source marks the staging `FINAL`: the parked destination pod
   leaves its wait init container and kubelet starts the container, whose `lcm-runc create`
-  waits for `READY`. Kubelet's ~1-2 s of start-up overlaps the dump and transfer.
+  waits for `READY`. Kubelet's ~1-2 s of start-up overlaps the dump and transfer. That wait
+  runs inside one CRI call, so it is capped (100 s): when the final dump and its transfer are
+  expected to take over 60 s (a slow link), the source doesn't mark `FINAL` and the container
+  starts once `READY` is there. If an attempt still gives up, kubelet retries, and `lcm`
+  waits (up to 6 min) for a retry to restore rather than rolling back.
 
 ## Performance knobs
 
