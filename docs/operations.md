@@ -138,6 +138,7 @@ the metric HELP text for the exact list.
 | the source `lcm-agent` restarts | after the final dump | the restarted agent ships the dump and marks the destination ready; the parked destination pod restores (tested in the lab with players connected: no disconnects) |
 | the final dump's runc/CRIU still run 5 min after the agent restarted | during the final dump | nothing is touched (fence, images): the migration is reported as failed after the source stopped, naming the processes; see "A final dump that outlives an agent restart" |
 | the destination's staging can't hold the final dump (pre-copy didn't converge) | right before the final dump | aborted; the source keeps running (the source asks the destination's free staging first) |
+| the container has a mount on a `/proc` or `/sys` path the destination's kernel lacks (e.g. `/proc/scsi` without `scsi_mod` loaded) | before pre-copy | refused; the source keeps running. CRIU couldn't recreate that mountpoint inside the destination's procfs/sysfs. Load the module on the destination (better: load it at boot on every node, so all nodes look the same) |
 | shipping fails | after the final dump | retried for 90 s (e.g. a destination agent restart); then the CLI reports where the images are (final dump on the source, pre-dumps on the destination) for `lcm recover` |
 | the restore fails on the destination | after shipping | the destination pod is fenced, the images are forwarded back, the workload is restored on the source node (~10-15 s freeze) |
 | the CLI dies / its connection drops | any time | nothing stops; the agents reclaim RAM staging of migrations that completed; with a LivePod, the controller deletes the fenced source pod 2 min after its successor is Ready (otherwise delete it by hand); leftover destination pods carry the `lcm.rooty.dev/migration-id` annotation |
@@ -245,6 +246,7 @@ Common CRIU errors:
 | `Can't bind inet socket back: Cannot assign requested address` | an outbound connection's old pod IP couldn't be aliased; check `lcm-runc.log` for the alias step. |
 | `iptables-restore ... not found` | CRIU network lock without tools: the module configures `network-lock nftables`; check `/etc/criu/runc.conf`. |
 | `Dumping FAILED` with `UDPLITE: -2` | CRIU older than 4.2 on a kernel >= 7.1. |
+| `mnt-v2: Can't stat mountpoint .../proc/scsi` on restore | the destination's kernel lacks a /proc path the source's had (here scsi_mod wasn't loaded). Agents since the /proc and /sys check refuse such a migration before it starts. |
 
 ## State on a node (`/var/lib/lcm`)
 

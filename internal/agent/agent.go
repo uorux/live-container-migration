@@ -24,7 +24,8 @@
 //	POST   /v1/report                     lcm CLI: a finished migration's outcome (metrics + history)
 //	GET    /v1/migrations[?n=50]          migration history reported to this agent
 //	POST   /v1/pull                       pull images ({"images": [...]}) into containerd ahead of a restore
-//	GET    /v1/info                       this node's addresses and TLS port (for picking a transfer network)
+//	GET    /v1/info                       this node's addresses and TLS port (for picking a transfer network);
+//	                                      ?path=P (repeatable): which /proc or /sys paths it lacks
 //	GET    /v1/relay?container=ID         player connections carried by the container's lcm-relay
 //	POST   /v1/wake/{backend}             wake the on-demand LivePod(s) for a gateway backend
 //	                                      (agent token, or the wake-only token)
@@ -324,6 +325,18 @@ func (a *Agent) handleInfo(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		info["containerAnon"] = anon
+	}
+	// ?path=/proc/...&path=/sys/...: which of a container's procfs/sysfs mountpoints this node
+	// lacks (procpaths.go). Always present when asked, so the source can tell an agent that
+	// checked (an empty list) from one that predates the check.
+	if paths := r.URL.Query()["path"]; len(paths) > 0 {
+		for _, p := range paths {
+			if !validProcSysPath(p) {
+				http.Error(w, "path must be a clean path under /proc or /sys", http.StatusBadRequest)
+				return
+			}
+		}
+		info["missingPaths"] = missingPaths("/", paths)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(info)

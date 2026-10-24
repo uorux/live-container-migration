@@ -75,6 +75,18 @@ func (a *Agent) checkpoint(ctx context.Context, req api.CheckpointRequest, emit 
 	if dst.encoding(ctx) == "" {
 		emit(api.Event{Phase: "precopy", Message: "the destination agent predates compressed transfers; shipping uncompressed (upgrade it)"})
 	}
+	// Mounts on /proc or /sys paths the destination's kernel doesn't provide can't be restored
+	// there (procpaths.go): refuse now, before anything stops.
+	if paths, err := procSysMounts(st.Pid); err != nil {
+		emit(api.Event{Phase: "precopy", Message: fmt.Sprintf("warning: can't list the container's /proc and /sys mounts (%v); not checking the destination has them", err)})
+	} else if len(paths) > 0 {
+		switch missing, ok := dst.missingPaths(ctx, paths); {
+		case !ok:
+			emit(api.Event{Phase: "precopy", Message: "warning: the destination agent predates the /proc and /sys mountpoint check (upgrade it); not checking"})
+		case len(missing) > 0:
+			return nil, fmt.Errorf("the container has mounts on %s, which the destination doesn't have (a kernel module loaded here but not there? /proc/scsi comes with scsi_mod), so CRIU couldn't restore it there; not stopping the workload", strings.Join(missing, ", "))
+		}
+	}
 
 	// Warm the destination's view of shared volumes while pre-copy runs (see warm.go).
 	warmed := map[string]bool{}

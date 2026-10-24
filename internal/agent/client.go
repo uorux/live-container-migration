@@ -169,6 +169,29 @@ func (c *stagingClient) memAvailable(ctx context.Context) int64 { return c.info(
 // memTotal returns the receiver's MemTotal, or -1 if it doesn't say.
 func (c *stagingClient) memTotal(ctx context.Context) int64 { return c.info(ctx, "memTotal") }
 
+// missingPaths asks the receiver which of paths (under /proc or /sys) it doesn't have. ok is false
+// if it doesn't say: an agent from before the check, or no answer.
+func (c *stagingClient) missingPaths(ctx context.Context, paths []string) (missing []string, ok bool) {
+	q := url.Values{"path": paths}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(c.base, "/")+"/v1/info?"+q.Encode(), nil)
+	if err != nil {
+		return nil, false
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	resp, err := c.client().Do(req)
+	if err != nil {
+		return nil, false
+	}
+	defer resp.Body.Close()
+	var info struct {
+		MissingPaths *[]string `json:"missingPaths"`
+	}
+	if resp.StatusCode/100 != 2 || json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&info) != nil || info.MissingPaths == nil {
+		return nil, false
+	}
+	return *info.MissingPaths, true
+}
+
 // info returns one numeric field of the receiver's /v1/info, or -1.
 func (c *stagingClient) info(ctx context.Context, field string) int64 {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(c.base, "/")+"/v1/info", nil)
