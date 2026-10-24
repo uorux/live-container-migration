@@ -107,6 +107,11 @@ retention bounded (`SystemMaxUse=`).
   memory-capped at 128M, and it starts from "now" (no backfill);
 - HAProxy's Prometheus endpoint on `:8405`, refusing everything but the tailnet and loopback.
 
+`monitoring/haproxy-logs.sh` then sends HAProxy's connection logs (tcplog, real client
+addresses thanks to PROXY) to Vector over UDP `127.0.0.1:5140` (works from HAProxy's chroot),
+tagged `app=haproxy`, `_SYSTEMD_UNIT=haproxy.service`. On a box that logs to `/dev/log` the
+local copy is kept. `vector tap --url http://127.0.0.1:8686/graphql haproxy` shows live events.
+
 The homelab side is `deploy/homelab/monitoring/ingress-monitoring.yaml` (scrapes, probes,
 alerts) and `deploy/homelab/logs/ingest.yaml`. The tailnet policy must let the k3s nodes reach
 the boxes on tcp 9100, 9115 and 8405.

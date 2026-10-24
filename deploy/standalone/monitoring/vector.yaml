@@ -1,12 +1,29 @@
 data_dir: /var/lib/ingress-vector
+api:
+  enabled: true              # `vector tap` / `vector top` on the box
+  address: 127.0.0.1:8686
 sources:
   journal:
     type: journald
     since_now: true          # no backfill of the existing journal
+  # HAProxy's connection logs (tcplog, real client addresses via PROXY): it sends syslog over
+  # UDP here (global "log 127.0.0.1:5140 ..."), which works from its chroot.
+  haproxy_syslog:
+    type: syslog
+    mode: udp
+    address: 127.0.0.1:5140
+transforms:
+  haproxy:
+    type: remap
+    inputs: [haproxy_syslog]
+    source: |
+      .host = get_hostname!()
+      .app = "haproxy"
+      ._SYSTEMD_UNIT = "haproxy.service"
 sinks:
   victorialogs:
     type: http
-    inputs: [journal]
+    inputs: [journal, haproxy]
     # Insert-only route, accepted from the tailnet only (homelab apps/infra/logs).
     uri: "https://logs-ingest.k8s.rooty.dev/insert/jsonline?_stream_fields=host,_SYSTEMD_UNIT&_msg_field=message&_time_field=timestamp"
     encoding:
