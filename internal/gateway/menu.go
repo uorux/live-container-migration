@@ -287,6 +287,7 @@ type menuSession struct {
 	c     net.Conn
 	p     mcproto.MenuProtocol
 	hs    mcproto.Handshake
+	ls    mcproto.LoginStart
 	open  wire.Open
 	log   *slog.Logger
 	shown []byte // the last dialog packet sent
@@ -347,7 +348,7 @@ func (g *Gateway) serveMenu(c net.Conn, rd *mcproto.Reader, hs mcproto.Handshake
 		}
 	}()
 	open := wire.Open{Src: addrPort(c.RemoteAddr()), Dst: addrPort(c.LocalAddr())}
-	m := &menuSession{g: g, c: c, p: p, hs: hs, open: open, log: log}
+	m := &menuSession{g: g, c: c, p: p, hs: hs, ls: ls, open: open, log: log}
 	result := m.run(clicks, gone)
 	g.metrics.menu.Inc(result)
 	log.Info("menu: player left the menu", "result", result)
@@ -423,6 +424,12 @@ func (m *menuSession) run(clicks <-chan string, gone <-chan struct{}) string {
 					return m.transfer(b)
 				}
 				showing = false
+				if !mc.Whitelist.Allowed(b.Name, m.ls.Name, &m.ls.UUID) {
+					m.log.Info("menu: not whitelisted; not starting", "backend", b.Name)
+					g.metrics.conns.Inc(b.Name, resultNotWhitelisted)
+					m.showNotice("Not whitelisted", "You aren't on the whitelist for "+g.label(b)+".")
+					continue
+				}
 				if g.cfg.Wake == nil {
 					m.showNotice(g.label(b)+" is offline", g.label(b)+" isn't running, and this gateway can't start servers.")
 					continue

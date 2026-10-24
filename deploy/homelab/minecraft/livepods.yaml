@@ -136,8 +136,8 @@
           },
           {
             "name": "lists",
-            "secret": {
-              "secretName": "mc-whitelist",
+            "configMap": {
+              "name": "mc-whitelist",
               "items": [
                 {
                   "key": "backend.json",
@@ -291,8 +291,8 @@
           },
           {
             "name": "lists",
-            "secret": {
-              "secretName": "mc-whitelist",
+            "configMap": {
+              "name": "mc-whitelist",
               "items": [
                 {
                   "key": "backend.json",
@@ -446,8 +446,8 @@
           },
           {
             "name": "lists",
-            "secret": {
-              "secretName": "mc-whitelist",
+            "configMap": {
+              "name": "mc-whitelist",
               "items": [
                 {
                   "key": "bmc.json",
@@ -601,8 +601,8 @@
           },
           {
             "name": "lists",
-            "secret": {
-              "secretName": "mc-whitelist",
+            "configMap": {
+              "name": "mc-whitelist",
               "items": [
                 {
                   "key": "backend.json",
@@ -756,8 +756,8 @@
           },
           {
             "name": "lists",
-            "secret": {
-              "secretName": "mc-whitelist",
+            "configMap": {
+              "name": "mc-whitelist",
               "items": [
                 {
                   "key": "backend.json",
@@ -911,8 +911,8 @@
           },
           {
             "name": "lists",
-            "secret": {
-              "secretName": "mc-whitelist",
+            "configMap": {
+              "name": "mc-whitelist",
               "items": [
                 {
                   "key": "backend.json",
@@ -1066,8 +1066,8 @@
           },
           {
             "name": "lists",
-            "secret": {
-              "secretName": "mc-whitelist",
+            "configMap": {
+              "name": "mc-whitelist",
               "items": [
                 {
                   "key": "backend.json",
@@ -1221,8 +1221,8 @@
           },
           {
             "name": "lists",
-            "secret": {
-              "secretName": "mc-whitelist",
+            "configMap": {
+              "name": "mc-whitelist",
               "items": [
                 {
                   "key": "backend.json",
@@ -1376,8 +1376,8 @@
           },
           {
             "name": "lists",
-            "secret": {
-              "secretName": "mc-whitelist",
+            "configMap": {
+              "name": "mc-whitelist",
               "items": [
                 {
                   "key": "backend.json",
@@ -1531,8 +1531,8 @@
           },
           {
             "name": "lists",
-            "secret": {
-              "secretName": "mc-whitelist",
+            "configMap": {
+              "name": "mc-whitelist",
               "items": [
                 {
                   "key": "backend.json",
@@ -1686,8 +1686,8 @@
           },
           {
             "name": "lists",
-            "secret": {
-              "secretName": "mc-whitelist",
+            "configMap": {
+              "name": "mc-whitelist",
               "items": [
                 {
                   "key": "backend.json",
@@ -1841,8 +1841,8 @@
           },
           {
             "name": "lists",
-            "secret": {
-              "secretName": "mc-whitelist",
+            "configMap": {
+              "name": "mc-whitelist",
               "items": [
                 {
                   "key": "global.json",

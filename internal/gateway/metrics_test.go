@@ -124,9 +124,11 @@ func TestMetricsOutageAndResume(t *testing.T) {
 	if got := m[`lcm_gateway_bytes_total{backend="default",direction="to_server"}`]; got != float64(len(msg)) {
 		t.Fatalf("to_server bytes %v", got)
 	}
-	if got := m[`lcm_gateway_bytes_total{backend="default",direction="to_player"}`]; got != float64(len(msg)) {
-		t.Fatalf("to_player bytes %v", got)
-	}
+	// The gateway counts bytes to the player after writing them, so the
+	// player may read them first.
+	e.waitFor("to_player bytes counted", func() bool {
+		return scrape(t, e.gw)[`lcm_gateway_bytes_total{backend="default",direction="to_player"}`] == float64(len(msg))
+	})
 
 	if err := r.Quiesce(context.Background()); err != nil {
 		t.Fatal(err)

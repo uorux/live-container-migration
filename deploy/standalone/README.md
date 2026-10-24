@@ -25,7 +25,16 @@ player ──▶ HAProxy :25565 ──send-proxy-v2──▶ 127.0.0.1:25566 lcm
    ```
    `gateway.env` must list the same backends as the in-cluster VIP gateway
    (`deploy/homelab/minecraft-gw/gateway-vip.yaml`).
-3. **Secrets**, run from your own machine with the 1Password CLI signed in, so values only ever
+3. **Whitelists.** Only listed players can wake an asleep server (everyone else gets "not
+   white-listed" before anything starts). Copy the lists from the cluster, and again after each
+   whitelist change; the gateway picks up edits within seconds, no restart:
+   ```sh
+   for k in backend global bmc ops-global ops-bmc; do
+     kubectl -n minecraft-gw get configmap mc-whitelist -o jsonpath="{.data.$k\.json}" \
+       | ssh root@BOX "install -D -m 0644 /dev/stdin /etc/lcm-gateway/lists/$k.json"
+   done
+   ```
+4. **Secrets**, run from your own machine with the 1Password CLI signed in, so values only ever
    travel through a pipe. They are stored encrypted on the box.
    ```sh
    # The tunnel token: the same value as the k8s Secret lcm-tunnel (1Password item minecraft-tunnel).
@@ -37,17 +46,17 @@ player ──▶ HAProxy :25565 ──send-proxy-v2──▶ 127.0.0.1:25566 lcm
    ```
    On systemd < 250, write the files with `install -m 0400 /dev/stdin /etc/lcm-gateway/creds/…`
    and use `LoadCredential=` instead of `LoadCredentialEncrypted=` in the unit.
-4. **Service.**
+5. **Service.**
    ```sh
    install -m 0644 lcm-gateway.service /etc/systemd/system/
    systemctl daemon-reload && systemctl enable --now lcm-gateway
    curl -s http://127.0.0.1:7001/status    # backends listed; "connected" once relays dial in
    ```
-5. **Firewall:** 7000 (relays) and 7001 (admin, metrics) must only be reachable over the tailnet.
+6. **Firewall:** 7000 (relays) and 7001 (admin, metrics) must only be reachable over the tailnet.
    The unit already refuses anything else (`IPAddressAllow`); keep the host firewall closed for
    them too. Tailnet ACL: allow the k3s nodes → this box on tcp 7000 and 7001 (pod traffic
    arrives as the node's tailnet IP), and this box → the nodes on tcp 7790 (wake).
-6. **HAProxy, the cutover:** point the Minecraft backend at the gateway.
+7. **HAProxy, the cutover:** point the Minecraft backend at the gateway.
    ```haproxy
    backend mc
        # before: server recusant <recusant-tailnet-ip>:25601 send-proxy-v2

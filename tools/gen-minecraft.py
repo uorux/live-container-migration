@@ -5,9 +5,16 @@ One LivePod + PVC per pack, from PACKS below and the image digests in
 deploy/homelab/minecraft/images.json ({"atm9": "registry/mc-atm9@sha256:...", ...}). A pack with no
 digest gets an obviously invalid image, so nothing half-configured can start; don't merge until
 every pack has one. Run from the repo root: python3 tools/gen-minecraft.py
+
+Whitelists: the repo carries empty placeholder lists (this repo is public; the player lists live
+only in the homelab). `python3 tools/gen-minecraft.py --players players.json` prints the real
+mc-whitelist ConfigMaps for both namespaces to stdout, from
+{"backend": {"<name>": "<uuid>", ...}, "global": {...}, "bmc": {...}, "ops-global": {...},
+"ops-bmc": {...}} (the nixos-dots attrsets as JSON).
 """
 import json
 import os
+import sys
 
 OUT = "deploy/homelab/minecraft"
 
@@ -48,6 +55,30 @@ LABELS = {
     "integratedmc": "Integrated MC",
     "abyssalascent": "Abyssal Ascent",
 }
+
+# The mc-whitelist ConfigMap's keys: whitelist.json-format lists and ops.json-format lists.
+LISTS = ["backend.json", "global.json", "bmc.json", "ops-global.json", "ops-bmc.json"]
+
+
+def whitelist_spec(root):
+    """The gateways' -whitelist value: who may wake each pack (its whitelist plus its ops, as on a
+    vanilla server). The most common pair becomes "*"."""
+    pairs = {n: f"{root}/{wl}+{root}/{ops}" for n, _, _, _, wl, ops, _ in PACKS}
+    common = max(set(pairs.values()), key=list(pairs.values()).count)
+    return ",".join([f"*={common}"] + [f"{n}={v}" for n, v in pairs.items() if v != common])
+
+
+def whitelist_configmaps(players):
+    def entries(key):
+        names = players.get(key.removesuffix(".json"), {})
+        if key.startswith("ops-"):
+            return [{"uuid": u, "name": n, "level": 4, "bypassesPlayerLimit": False} for n, u in names.items()]
+        return [{"uuid": u, "name": n} for n, u in names.items()]
+    data = {k: json.dumps(entries(k), indent=2) + "\n" for k in LISTS}
+    # The servers copy theirs over /data at every start; the gateways re-read theirs within seconds.
+    return [{"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "mc-whitelist", "namespace": ns},
+             "data": data} for ns in ("minecraft", "minecraft-gw")]
+
 
 # Every gateway the relays keep a session with: the in-cluster VIP gateways (one Service; standbys
 # forward) and each VPS ingress box's tailnet address, port 7000 (deploy/standalone). Add the boxes
@@ -121,7 +152,7 @@ def livepod(name, req, lim, wl, ops, modded, image):
                         {"name": "secret", "secret": {"secretName": "lcm-tunnel"}},
                         # mc-start copies these over /data/{whitelist,ops}.json at every start, so the
                         # Secret is the source of truth: in-game /whitelist and /op last until a restart.
-                        {"name": "lists", "secret": {"secretName": "mc-whitelist", "items": [
+                        {"name": "lists", "configMap": {"name": "mc-whitelist", "items": [
                             {"key": wl, "path": "whitelist.json"},
                             {"key": ops, "path": "ops.json"},
                         ]}},
@@ -197,12 +228,6 @@ STATIC = {
         {"apiVersion": "onepassword.com/v1", "kind": "OnePasswordItem",
          "metadata": {"name": "lcm-tunnel", "namespace": "minecraft"},
          "spec": {"itemPath": "vaults/k8s/items/minecraft-tunnel"}},
-        # Fields backend.json, global.json, bmc.json (whitelist.json format) and ops-global.json,
-        # ops-bmc.json (ops.json format), from nixos-dots' whitelist-secrets.nix and
-        # globalOperators. A pack whose list is missing stays whitelisted and empty.
-        {"apiVersion": "onepassword.com/v1", "kind": "OnePasswordItem",
-         "metadata": {"name": "mc-whitelist", "namespace": "minecraft"},
-         "spec": {"itemPath": "vaults/k8s/items/minecraft-whitelist"}},
     ],
     "monitoring.yaml": [
         # Server metrics while a pack is awake (asleep packs have no target; that's not an outage:
@@ -251,6 +276,7 @@ resources:
   - namespace.yaml
   - policy.yaml
   - secrets.yaml
+  - whitelist.yaml
   - pvcs.yaml
   - livepods.yaml
   - backup.yaml
@@ -290,6 +316,11 @@ def dump(path, docs, comment=""):
 
 
 def main():
+    if len(sys.argv) == 3 and sys.argv[1] == "--players":
+        with open(sys.argv[2]) as f:
+            players = json.load(f)
+        sys.stdout.write("---\n".join(json.dumps(d, indent=2) + "\n" for d in whitelist_configmaps(players)))
+        return
     with open(os.path.join(OUT, "images.json")) as f:
         images = json.load(f)
     missing = [p[0] for p in PACKS if not images.get(p[0])]
@@ -302,12 +333,20 @@ def main():
          "# World data, CephFS RWX (the restored server sees the same files on its new node).\n"
          "# Velero backs these up via the rwx-backup helpers (apps/infra/backup).\n")
     dump("backup.yaml", [backup_helper()])
+    placeholder = ("# PLACEHOLDER: empty lists, so nobody can join or wake anything. The homelab copy holds the\n"
+                   "# real lists (tools/gen-minecraft.py --players); never commit player names to the lcm repo.\n")
+    cms = whitelist_configmaps({})
+    dump("whitelist.yaml", cms[:1], placeholder)
+    with open("deploy/homelab/minecraft-gw/whitelist.yaml", "w") as f:
+        f.write(HEADER + placeholder + json.dumps(cms[1], indent=2) + "\n")
     for path, docs in STATIC.items():
         dump(path, docs)
     dump("netpol.yaml", [NETPOL], "# Not applied yet (see kustomization.yaml).\n")
     with open(os.path.join(OUT, "kustomization.yaml"), "w") as f:
         f.write(HEADER + KUSTOMIZATION)
     print("gateway labels: " + ",".join(f"{k}={v}" for k, v in LABELS.items()))
+    print("VIP gateway: -whitelist=" + whitelist_spec("/etc/mc"))
+    print("VPS gateway: LCM_WHITELIST=" + whitelist_spec("/etc/lcm-gateway/lists"))
     req = sum(p[1] for p in PACKS)
     print(f"{len(PACKS)} packs, {req} GiB requested if all awake; missing digests: {', '.join(missing) or 'none'}")
 

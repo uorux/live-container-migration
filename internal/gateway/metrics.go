@@ -27,6 +27,7 @@ const (
 	resultError          = "error"            // protocol error (window overrun, offset mismatch)
 	resultShutdown       = "shutdown"         // gateway shutting down
 	resultHandedOff      = "handed_off"       // moved, still open, to the gateway that took over the VIP
+	resultNotWhitelisted = "not_whitelisted"  // login to an asleep backend refused by -whitelist (nothing woken)
 )
 
 var closeResults = map[tunnel.CloseReason]string{
@@ -105,7 +106,7 @@ func (m *gwMetrics) initBackend(name string) {
 		m.connects.Add(0, name, k)
 	}
 	for _, r := range []string{resultOpened, resultClosedByPlayer, resultClosedByServer, resultResetByPlayer,
-		resultResetByServer, resultSessionLost, resultHoldTimeout, resultError, resultShutdown} {
+		resultResetByServer, resultSessionLost, resultHoldTimeout, resultError, resultShutdown, resultNotWhitelisted} {
 		m.conns.Add(0, name, r)
 	}
 	m.bytes.Add(0, name, "to_server")

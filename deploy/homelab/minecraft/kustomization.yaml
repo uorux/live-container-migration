@@ -5,6 +5,7 @@ resources:
   - namespace.yaml
   - policy.yaml
   - secrets.yaml
+  - whitelist.yaml
   - pvcs.yaml
   - livepods.yaml
   - backup.yaml

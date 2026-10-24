@@ -65,6 +65,15 @@ forwards uncompressed to an old source.
   `services.lcm.livePods.wakeTokenSecrets = [ "ns/name" ]` makes the leading controller keep it
   in those Secrets (key `token`) for gateways in the cluster. Gateways outside the cluster get
   a copy of `/run/lcm/wake-token` once.
+- **Who may wake a server:** without `-whitelist`, any login attempt wakes the server it names,
+  so a stranger could wake every pack and fill the cluster's memory. `-whitelist
+  'backend=file[+file],*=file'` (env `LCM_WHITELIST`; vanilla `whitelist.json`/`ops.json` files,
+  re-read within seconds of a change) makes the gateway refuse a login to an *asleep* backend
+  from anyone not listed, with the vanilla "not white-listed" message, before anything wakes. The
+  menu does the same with a notice. Running servers are untouched: they check for themselves.
+  Login names aren't authenticated, so this stops scanners and bots, not someone who knows a
+  listed name. Refusals count as `lcm_gateway_player_connections_total{result="not_whitelisted"}`.
+  An unreadable list allows nobody, and an empty one is logged at startup.
 
 ## Quick look
 

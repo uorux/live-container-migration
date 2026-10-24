@@ -10,7 +10,9 @@ Window: announce 3 h; expect about 2 h, mostly the final copy and its checksum p
 | Done when | Check |
 |---|---|
 | Nodes run lcm ≥ e71cb0a with `livePods.enable` | `lcm version` on each node; `lcm_livepod_controller_leader` is 1 on one node |
-| 1Password items `k8s/minecraft-tunnel` (field `token`, random, 32+ bytes) and `k8s/minecraft-whitelist` (fields `backend.json`, `global.json`, `bmc.json`, `ops-global.json`, `ops-bmc.json`, from nixos-dots' `whitelist-secrets.nix` and `globalOperators`) exist | `kubectl -n minecraft get secret lcm-tunnel mc-whitelist` |
+| 1Password item `k8s/minecraft-tunnel` (field `token`, random, 32+ bytes) exists | `kubectl -n minecraft get secret lcm-tunnel` |
+| The homelab's `whitelist.yaml` in both `minecraft` and `minecraft-gw` holds the real lists (`tools/gen-minecraft.py --players players.json`, from nixos-dots' `whitelist-secrets.nix` and `globalOperators`; never in the lcm repo). Empty lists mean nobody can join or wake anything | gateway log `whitelist loaded ... entries=N` for `*`, `sdfs`, `bettermc` |
+| VPS boxes have the lists in `/etc/lcm-gateway/lists/` (deploy/standalone README step 3) | same log line on each box |
 | homelab: CRD + monitoring (#393), minecraft-gw (#394), minecraft (digests filled) merged | `kubectl -n minecraft get livepods`: all `Asleep`; `kubectl -n minecraft-gw get pods`: one per node, one with `lcm_gateway_vip_active 1` |
 | Each image passed the acceptance test (lcm-test: boot, join, 5 migrations with a player, idle sleep, wake) | the image agent's report |
 | VPS boxes: lcm-gateway installed and running, HAProxy still pointing at recusant | `curl <box>:7001/status` lists the 12 backends |
@@ -100,7 +102,9 @@ above needs a decision. sdfs also needs `world_nether/`, `world_the_end/` and it
    - the bare domain shows the menu; pick a pack: held, woken, transferred, joined;
    - `<pack>.<domain>` for a Forge 1.20.1, a NeoForge 1.21.1 and a Fabric pack, and sdfs;
    - the same through a VPS box;
-   - a non-whitelisted account is refused by the server;
+   - a non-whitelisted account gets "not white-listed" from the gateway without waking an asleep
+     pack (`not_whitelisted` in `lcm_gateway_player_connections_total`), and is refused by a
+     running server;
    - with a player connected: `lcm migrate livepod/<pack> -n minecraft --to auto` (pause of a
      few seconds, no disconnect) and `curl -X POST <active gateway admin>/vip/handoff` (pause of
      ~0.1 s);

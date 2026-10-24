@@ -54,6 +54,7 @@ func main() {
 	holdMessage := flag.String("hold-message", cliutil.EnvDefault("LCM_HOLD_MESSAGE", "The server did not start in time. Please try again later."), "Login Disconnect text when -hold-max passes (-minecraft; env LCM_HOLD_MESSAGE)")
 	menu := flag.Bool("menu", envBool("LCM_MENU"), "players whose hostname names no backend get a server menu that starts the server they pick and transfers them to it (1.21.6+ clients; older ones get a list of addresses) instead of the default backend (-minecraft; env LCM_MENU=true)")
 	menuTitle := flag.String("menu-title", cliutil.EnvDefault("LCM_MENU_TITLE", "Minecraft servers"), "title of the server menu and its server list entry (env LCM_MENU_TITLE)")
+	whitelist := flag.String("whitelist", cliutil.EnvDefault("LCM_WHITELIST", ""), "who may wake an asleep backend: backend=file[+file],... with * for every other backend; files are whitelist.json/ops.json lists (-minecraft; env LCM_WHITELIST)")
 	labels := flag.String("label", cliutil.EnvDefault("LCM_LABELS", ""), "display names in the menu, backend=name pairs separated by commas (env LCM_LABELS)")
 	acceptProxy := flag.String("accept-proxy", cliutil.EnvDefault("LCM_ACCEPT_PROXY", ""), "comma-separated CIDRs (e.g. 127.0.0.1/32 for a local HAProxy with send-proxy-v2) whose player connections start with a PROXY v2 header (env LCM_ACCEPT_PROXY)")
 	wakeURLs := flag.String("wake-url", cliutil.EnvDefault("LCM_WAKE_URL", ""), "lcm-agent base URLs (comma-separated, e.g. http://node:7790) to wake an on-demand backend when a player arrives and its relay isn't connected (env LCM_WAKE_URL)")
@@ -95,11 +96,20 @@ func main() {
 		fmt.Fprintln(os.Stderr, "lcm-gateway: -menu needs -minecraft")
 		os.Exit(2)
 	}
+	if *whitelist != "" && !*minecraft {
+		fmt.Fprintln(os.Stderr, "lcm-gateway: -whitelist needs -minecraft")
+		os.Exit(2)
+	}
 	var mc *gateway.MinecraftConfig
 	if *minecraft {
+		wl, err := gateway.ParseWhitelist(*whitelist, log)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "lcm-gateway:", err)
+			os.Exit(2)
+		}
 		mc = &gateway.MinecraftConfig{MOTD: *motd, VersionName: *statusVersion,
 			HoldInterval: *holdInterval, MaxHold: *holdMax, HoldMessage: *holdMessage,
-			Menu: *menu, MenuTitle: *menuTitle, Labels: labelMap}
+			Menu: *menu, MenuTitle: *menuTitle, Labels: labelMap, Whitelist: wl}
 	}
 	var trusted []netip.Prefix
 	for _, c := range strings.Split(*acceptProxy, ",") {

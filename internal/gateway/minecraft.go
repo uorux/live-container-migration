@@ -44,7 +44,13 @@ type MinecraftConfig struct {
 	MenuTitle string
 	// Labels are display names for backends in the menu.
 	Labels map[string]string
+	// Whitelist, if set, decides who may wake (and be held for) an asleep
+	// backend; others get the vanilla "not white-listed" disconnect.
+	Whitelist *Whitelist
 }
+
+// notWhitelisted is the vanilla server's message.
+const notWhitelisted = "You are not white-listed on this server!"
 
 func (m *MinecraftConfig) defaults() {
 	if m.MOTD == "" {
@@ -177,6 +183,14 @@ func (g *Gateway) handleMinecraft(c net.Conn, b *Backend) {
 	}
 	if menu {
 		g.serveMenu(c, rd, hs, body, log)
+		return
+	}
+	if !b.Session().Connected() && !mc.Whitelist.Allowed(b.Name, name, loginUUID(body, len(mcproto.AppendString(nil, name)))) {
+		log.Info("not whitelisted; refused without waking", "backend", b.Name)
+		g.metrics.conns.Inc(b.Name, resultNotWhitelisted)
+		c.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		c.Write(mcproto.LoginDisconnect(notWhitelisted))
+		gracefulClose(c)
 		return
 	}
 	c.SetReadDeadline(time.Time{})

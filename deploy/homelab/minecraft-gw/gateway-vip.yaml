@@ -2,7 +2,8 @@
 # (docs/router-path.md). A Lease picks the serving gateway; it hands its players to another on
 # SIGTERM (node drain, rollout) with ~0.1 s pauses. Relays reach any of them through
 # lcm-gateway-vip-tunnel; standbys forward to the serving one. The wake token Secret lcm-wake is
-# created and kept by the LivePod controller (services.lcm.livePods.wakeTokenSecrets).
+# created and kept by the LivePod controller (services.lcm.livePods.wakeTokenSecrets). mc-whitelist
+# (whitelist.yaml) says who may wake a pack.
 #
 # The VIP lives on an ipvlan in a private network namespace: no node NIC address ever changes.
 # The node serving it can't reach 10.0.0.250 itself (ipvlan doesn't hairpin); players can.
@@ -68,6 +69,9 @@ spec:
         # Any agent can take a wake; the one leading the LivePod controller acts (others: 503).
         - -wake-url=http://100.126.30.73:7790,http://100.103.225.29:7790,http://100.65.16.13:7790
         - -wake-token-file=/wake/token
+        # Only listed players (a pack's whitelist plus its ops) can wake an asleep pack; anyone else
+        # gets "not white-listed" before anything starts. Running servers check for themselves.
+        - "-whitelist=*=/etc/mc/backend.json+/etc/mc/ops-global.json,bettermc=/etc/mc/bmc.json+/etc/mc/ops-bmc.json,sdfs=/etc/mc/global.json+/etc/mc/ops-global.json"
         env:
         - {name: POD_NAME, valueFrom: {fieldRef: {fieldPath: metadata.name}}}
         - {name: POD_NAMESPACE, valueFrom: {fieldRef: {fieldPath: metadata.namespace}}}
@@ -80,10 +84,12 @@ spec:
         - {name: bin, mountPath: /lcm}
         - {name: secret, mountPath: /secret, readOnly: true}
         - {name: wake, mountPath: /wake, readOnly: true}
+        - {name: lists, mountPath: /etc/mc, readOnly: true}
       volumes:
       - {name: bin, emptyDir: {}}
       - {name: secret, secret: {secretName: lcm-tunnel}}
       - {name: wake, secret: {secretName: lcm-wake}}
+      - {name: lists, configMap: {name: mc-whitelist}}
 ---
 # Relays (namespace minecraft) dial this: any gateway pod works, standbys forward.
 apiVersion: v1
