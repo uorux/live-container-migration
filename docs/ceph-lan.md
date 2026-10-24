@@ -80,6 +80,60 @@
 >   secure (tailscaled already encrypts) and no LAN firewall change, gets ~139 MB/s (3.5x), but
 >   still needs the same mon IP migration as (b).
 
+> **Rehearsed in the lab 2026-10-24: option (b), Ceph msgr2 secure plus host networking on the
+> LAN.** Lab Ceph mirrors production: Rook 1.20.9, ceph-csi-drivers 1.0.4, Ceph v19.2.7-20261009,
+> 3 mons, an OSD per node, CephFS with a hot standby MDS (lab/rook/). The cluster starts on the
+> pod network, and node InternalIPs stay on a tunnel as production's do on the tailnet. The "LAN" is
+> a separate subnet on the plain NIC. A CephFS writer fsyncs every 200 ms throughout
+> (lab/rook/writer.yaml).
+>
+> 1. **`network.connections.encryption.enabled: true` + `requireMsgr2: true`** (one Helm upgrade).
+>    - Rook rolls mons, MDS, mgr and OSDs. The writer's worst pause was about 1 s per OSD restart.
+>    - Existing v1 mounts were **not** disconnected, despite Rook's warning. The mons keep their
+>      v1 address and `ms_bind_msgr1` stays true, so those mounts carry on unencrypted.
+>    - New mounts come up `ms_mode=secure` with `mon_addr=...:3300`.
+> 2. **Remount every consumer** (pod restart or lcm migration). Production's mounts today are all
+>    v1 (`mon_addr=<mon ClusterIPs>:6789`).
+>    - This step is mandatory before step 3. After it, the mons and OSDs are v2-only, and a v1
+>      mount can't reach them.
+>    - Check every node: each `ceph` line in /proc/mounts has `ms_mode=secure`. Check RBD mappings
+>      the same way; RBD wasn't in the rehearsal.
+> 3. **`network.provider: host` + `addressRanges` (public and cluster = the LAN)**, after
+>    annotating each node with `network.rook.io/mon-ip=<its LAN IP>`.
+>    - OSDs, MDS and mgr restart onto host networking and bind the LAN for public and cluster
+>      traffic. The writer's worst pause was 2 s (MDS restart), about 1 s per OSD.
+>    - **Rook then migrates the mons by itself**, one at a time, from its "fail over list". Each
+>      takes a ~20 s election, and the writer saw no stall.
+>    - **Do not fail mons over by hand.** I did, in the same second Rook started on another mon.
+>      Two of three mons were down, quorum was lost, and I/O froze for 10 minutes until a mon came
+>      back. The kernel client then resumed with no errors (one write took 593 s). Set
+>      `healthCheck.daemonHealth.mon.timeout` lower only if you want Rook to move faster.
+> 4. **Result:**
+>    - The monmap is `v2:<LAN IP>:3300` only, and the CSI connection object lists the LAN mons.
+>    - Mounted clients follow the monmap even though their mount options still name the old
+>      ClusterIPs.
+>    - The toolbox, on the pod network, still reaches everything through masquerading.
+>    - **Encryption is verified on the wire:** ~12 MB of a marker string written to CephFS
+>      appeared 0 times in a capture of the LAN, while a plaintext control on the same capture was
+>      found.
+>    - Lab throughput didn't change (54 vs 49 MB/s) because the lab is bound by its qcow2 disks.
+>      Production's numbers above (pod path 40 MB/s, TLS over LAN 267 MB/s) are what to expect.
+>
+> **Production runbook for (b)** (a Flux PR per step; `ceph osd set noout` around steps 1 and 3):
+> - **Before step 3:** nixos-dots opens tcp 3300 and 6800-7568 on enp0s7 for 10.0.0.10-12 only
+>   (like the 7791 rule). Annotate the nodes: arquitens 10.0.0.10, carrack 10.0.0.11,
+>   munificent 10.0.0.12.
+> - **Steps 1-3 as above.** Step 2 can take days: let pods restart and LivePods migrate, then
+>   force the stragglers.
+>   - Step 3 needs a node-by-node check first: no line in /proc/mounts lacks `ms_mode=secure`,
+>     and RBD mappings likewise.
+> - **Not rehearsed:**
+>   - RGW (it moves to host networking too; its Service keeps working for pods).
+>   - RBD clients.
+>   - Rolling back from host networking (another unsupported provider change).
+>   - A real 3-node cluster with the production data size, where OSD restarts take longer.
+>   Native routing and this change are independent; either can go first.
+
 # Ceph (and live migration) onto the LAN, encrypted: options and a staged plan
 
 Status: research and planning only. Nothing was run against any node or cluster. Written 2026-10-24.

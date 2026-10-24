@@ -39,7 +39,7 @@ in
 
     boot.kernelPackages = pkgs.linuxPackages_latest;
     # sock_diag modules CRIU uses to dump sockets (TCP repair needs tcp_diag).
-    boot.kernelModules = [ "inet_diag" "tcp_diag" "udp_diag" "unix_diag" "netlink_diag" "packet_diag" "nf_tables" "br_netfilter" ];
+    boot.kernelModules = [ "inet_diag" "tcp_diag" "udp_diag" "unix_diag" "netlink_diag" "packet_diag" "nf_tables" "br_netfilter" "rbd" "ceph" ];
 
     virtualisation = {
       memorySize = 12288; # room for a Rook mon/mgr/OSD/MDS per node next to the test workloads
