@@ -74,7 +74,8 @@ On the gateway, under one lock:
 
 - **Different session id, or the gateway has never seen one** → status NEW. Every stream that
   ever had an OPEN sent is reset: those players are disconnected, because the server they
-  talked to is gone. Streams never opened (players who arrived while no relay was attached) are
+  talked to is gone (unless the relay never used the previous connection; see the relay's NEW
+  below). Streams never opened (players who arrived while no relay was attached) are
   kept and opened on the new session. The new id is adopted.
 - **Same session** → RESUMED. For each gateway stream:
   - id > `max_seen`, or no OPEN ever sent → the relay never saw it. Send OPEN again and start
@@ -97,11 +98,15 @@ On the relay, applying HELLO_ACK:
     another gateway may still hold it, with streams of its own (one that lost the VIP while
     stalled), and resuming those there would splice stale streams onto live players, held back
     only by the offset check. Before processing anything, the relay sends GOAWAY with REBIND
-    as its first frame, half-closes, waits for the gateway to close, picks a new random id and
-    reconnects at once. A gateway receiving REBIND as the first frame on a connection it
-    answered NEW turns the streams it opened on that connection back into never-opened ones,
-    so the players held there are opened on the next session instead of being reset. (Older
-    gateways ignore the bit, and reset those streams.)
+    as its only frame, half-closes, waits for the gateway to close, picks a new random id and
+    reconnects at once.
+  - On the gateway, a NEW answer resets opened streams unless the previous connection was
+    answered NEW too and the relay never used it: no frame on it except a REBIND GOAWAY. Such a
+    relay never saw the OPENs sent there (whether it renewed its id or restarted), so those
+    streams, which can have no acknowledged or received bytes, become never-opened and are
+    opened on the new session from offset 0. This is decided when the new HELLO is handled, so
+    it doesn't matter whether the old connection's GOAWAY was read first. (Older gateways reset
+    those streams.)
 - RESUMED → each listed stream sets `tx_next = gateway.rx_offset` (checked the same way). Any
   stream not listed is closed: the player is gone. Any listed stream the relay no longer has
   gets a RESET.

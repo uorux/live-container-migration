@@ -33,10 +33,10 @@ type Conn struct {
 	goaway     []byte // GOAWAY payload once requested
 	goawaySent bool
 
-	// guarded by s.mu: frames received, and (gateway) whether the handshake
-	// answered NEW
-	frames      int
+	// guarded by s.mu (gateway): the handshake answered NEW; the relay sent a
+	// frame on this connection (anything but a REBIND GOAWAY)
 	answeredNew bool
+	used        bool
 
 	once     sync.Once
 	errMu    sync.Mutex
@@ -297,9 +297,10 @@ func (s *Session) ClientHandshake(nc net.Conn, backend string) (*Conn, error) {
 		return fail(fmt.Errorf("%w: window too small", wire.ErrProtocol))
 	}
 	if a.Status == wire.AckNew && s.renewID() {
-		// Hang up before processing anything, saying so: the gateway then
-		// opens the streams it sent OPENs for on this connection again on
-		// the next one, which presents the new id.
+		// Hang up before processing anything (saying so, and letting the
+		// gateway close first). Since nothing was used on this connection,
+		// the gateway opens the streams it sent OPENs for here again on the
+		// next one, which presents the new id, instead of resetting them.
 		nc.Write(wire.AppendFrame(nil, wire.TGoAway, 0, wire.GoAwayPayload(wire.GoAwayRebind, "new session id")))
 		if cw, ok := nc.(closeWriter); ok {
 			cw.CloseWrite()
