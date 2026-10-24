@@ -1,6 +1,8 @@
 # Cilium native routing over the tailnet
 
-Status (2026-10-24): rehearsed in the KVM lab, not applied to production.
+Status (2026-10-24): **live in production since 19:58Z.** Pod to pod across nodes measured 130 MB/s
+(1 and 4 streams; 112 MB/s reversed), against 40 MB/s over VXLAN. The first attempt failed; see
+"Production incident" below before ever changing the routing mode again.
 
 ## Why
 
@@ -52,7 +54,28 @@ Results:
 - Lab throughput went from 118 to 142 MB/s. The lab tunnel is kernel WireGuard, which doesn't
   penalise VXLAN the way tailscaled does, so the production numbers above are the ones to expect.
 
-## Production runbook
+## Production incident (2026-10-24 19:33-19:47Z)
+
+Following the runbook below as first written, with a Cilium config change and then all three
+agents restarted together, took the control plane down for about 13 minutes:
+- **What happened:** each agent rebuilt and reloaded the BPF programs of every endpoint on its node
+  at once, about 107 per node, while the node ran its full load. The kernel BPF verifier
+  (`bpf_prog_load` -> `bpf_check`) pinned CPUs: soft lockups of 23 s and RCU stalls on carrack,
+  load average up to 177.
+- **Effect:** tailscaled was starved, so the node dropped off the tailnet. etcd and the API run
+  over the tailnet, so etcd lost peers and nodes went NotReady.
+- **arquitens:** starved long enough that the softdog watchdog hard-reset it.
+- **The rollback** (the same mode change back, agents restarted again) caused the same thing on
+  carrack.
+- **Why the lab didn't show it:** about 10 endpoints per node, no softdog, and etcd not running
+  over the tunnel.
+
+**What worked:** change the config only (running agents ignore ConfigMap changes), then reboot the
+nodes. After a boot the agent comes up before the workloads, endpoints are built as pods start,
+and there were no soft lockups at all on any node. Never change routing mode, tunnel mode or
+anything else that forces a full endpoint regeneration with a live agent restart on these nodes.
+
+## Production runbook (superseded by the incident above: use change-then-bounce)
 
 1. **Tailnet policy (admin console):** auto-approve the pod CIDRs for the nodes and allow them
    between nodes:
