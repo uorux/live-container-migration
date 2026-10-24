@@ -51,6 +51,7 @@
 > | tailnet (tailscaled) | 139 MB/s | 133 MB/s | |
 > | kernel WireGuard over LAN | 109 MB/s | 116 MB/s | in a netns, MTU 1420, 218/1325 retransmits |
 > | **pod network** (host -> pod on another node) | **40 MB/s** | 42 MB/s | Cilium VXLAN inside the tailnet, pod MTU 1230; 32 MB/s reversed |
+> | pod -> other node's tailnet IP (no VXLAN, masqueraded) | 130 MB/s | 145 MB/s | what native routing over the tailnet would carry; 127 MB/s reversed |
 >
 > `rados bench` from the toolbox (pod network, size-3 pool, quiet cluster, OSD commit latency
 > 2-3 ms): 4 MiB writes 14.7 MB/s with 1 in flight (271 ms each) and 26 MB/s with 16 (avg 2.3 s,
@@ -66,6 +67,15 @@
 >   ~1.4 KB packets through the crosvm virtio path hits the same packets-per-second limit.
 > - **Encryption over plain TCP runs at LAN line rate**, because 64 KB segments go through virtio.
 >   That is (b), Ceph msgr2 secure on host networking over the LAN: roughly 6x today's Ceph path.
+> - **Faster pod network for everything, Ceph included:** Cilium native routing over the tailnet
+>   instead of VXLAN.
+>   - Each node advertises its pod /24 as a Tailscale subnet route (no SNAT) and accepts the
+>     others'. Cilium runs `routingMode: native` with `ipv4NativeRoutingCIDR: 10.42.0.0/16` and no
+>     autoDirectNodeRoutes.
+>   - Pod TCP then reaches tailscale0 as TCP and keeps the offloads: measured 130 MB/s vs 40.
+>   - Ceph speeds up about 3x without touching Ceph, and it all stays encrypted by Tailscale.
+>   - The catch is the switch itself: nodes in different routing modes can't reach each other's
+>     pods, so all three agents change in one short window.
 > - **A smaller alternative:** Ceph on host networking over the tailnet IPs. It needs no msgr2
 >   secure (tailscaled already encrypts) and no LAN firewall change, gets ~139 MB/s (3.5x), but
 >   still needs the same mon IP migration as (b).
