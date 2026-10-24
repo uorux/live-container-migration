@@ -197,11 +197,23 @@ func Migrate(ctx context.Context, kc kubernetes.Interface, o Options) (*Result, 
 		logf("warning: %s (pre-pulling without it)", w)
 	}
 	body, _ := json.Marshal(map[string]any{"images": images, "auth": auths})
-	if _, err := agentDo(ctx, dstURL, o.Token, http.MethodPost, "/v1/pull", bytes.NewReader(body)); err != nil {
-		logf("warning: pre-pulling images on %s: %v (kubelet will pull them during the blackout)", o.TargetNode, err)
-	} else {
-		logf("images present on %s after %s", o.TargetNode, time.Since(t1).Round(time.Millisecond))
+	// Nothing has stopped yet: a destination that can't show a usable image is refused here.
+	// kubelet would otherwise try again inside the blackout, and fail the restore if the
+	// registry is still away (2026-10-24: a 50 s rollback).
+	out, err := agentDo(ctx, dstURL, o.Token, http.MethodPost, "/v1/pull", bytes.NewReader(body))
+	if err != nil {
+		cleanupDest()
+		return nil, fmt.Errorf("the pod's images aren't usable on %s (%v); not stopping the workload", o.TargetNode, err)
 	}
+	var pulled struct {
+		Warnings []string `json:"warnings"`
+	}
+	if len(out) > 0 && json.Unmarshal(out, &pulled) == nil {
+		for _, w := range pulled.Warnings {
+			logf("warning: %s", w)
+		}
+	}
+	logf("images present on %s after %s", o.TargetNode, time.Since(t1).Round(time.Millisecond))
 	shipTo := shipURL(ctx, o, srcURL, dstURL, o.TargetNode, logf)
 
 	runHook(ctx, srcURL, o.Token, src, PreMigrateAnnotation, ctrID,

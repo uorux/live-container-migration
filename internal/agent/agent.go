@@ -261,8 +261,14 @@ func (a *Agent) handleCheckpointStatus(w http.ResponseWriter, r *http.Request) {
 	w.Write(b)
 }
 
-// handlePull pre-pulls a migrating pod's images so kubelet doesn't pull them inside the blackout
-// (it pulls a container's image only when it starts that container, i.e. after the wait).
+// handlePull makes sure a migrating pod's images are usable on this node before the source
+// stops: kubelet pulls a container's image only when it starts that container, i.e. after the
+// wait, inside the blackout. A digest-pinned image containerd already holds complete isn't
+// pulled again (it can't change, and a pull through a flaky registry can damage the local
+// record: carrack's bettermc image ended up with media type application/octet-stream after a
+// failed pull on 2026-10-24, and the restore then failed). A failed pull is still fine if the
+// local copy is complete. Anything else fails the request: the controller doesn't freeze.
+// 200 with {"warnings": [...]} when it fell back to a local copy, 204 when it pulled.
 func (a *Agent) handlePull(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Images []string `json:"images"`
@@ -273,9 +279,13 @@ func (a *Agent) handlePull(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	var errs []string
+	var errs, warns []string
 	for _, img := range req.Images {
 		if img == "" || strings.HasPrefix(img, "-") {
+			continue
+		}
+		if strings.Contains(img, "@sha256:") && imageComplete(r.Context(), img) {
+			a.log.Info("image already present", "image", img)
 			continue
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
@@ -288,7 +298,12 @@ func (a *Agent) handlePull(w http.ResponseWriter, r *http.Request) {
 		out, err := cmd.CombinedOutput()
 		cancel()
 		if err != nil {
-			errs = append(errs, fmt.Sprintf("%s: %v: %s", img, err, strings.TrimSpace(string(out))))
+			pullErr := fmt.Sprintf("%s: %v: %s", img, err, lastLine(strings.TrimSpace(string(out))))
+			if imageComplete(r.Context(), img) {
+				warns = append(warns, "pull failed, using the complete local copy: "+pullErr)
+				continue
+			}
+			errs = append(errs, pullErr+" (and no complete local copy)")
 			continue
 		}
 		a.log.Info("pre-pulled image", "image", img, "ms", time.Since(t0).Milliseconds())
@@ -297,7 +312,33 @@ func (a *Agent) handlePull(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, strings.Join(errs, "; "), http.StatusBadGateway)
 		return
 	}
+	if len(warns) > 0 {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string][]string{"warnings": warns})
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// imageComplete reports whether containerd holds img with every blob it references
+// (`ctr images check`): not just a record, which can point at nothing usable.
+func imageComplete(ctx context.Context, img string) bool {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "k3s", "ctr", "-n", "k8s.io", "images", "check", "name=="+img).Output()
+	return err == nil && imageCheckComplete(string(out), img)
+}
+
+// imageCheckComplete reads `ctr images check` output: REF TYPE DIGEST STATUS SIZE UNPACKED, where
+// STATUS is e.g. "complete (35/35)" or "unavailable (0/?)".
+func imageCheckComplete(out, img string) bool {
+	for _, line := range strings.Split(out, "\n") {
+		f := strings.Fields(line)
+		if len(f) >= 4 && f[0] == img {
+			return f[3] == "complete"
+		}
+	}
+	return false
 }
 
 func (a *Agent) handleInfo(w http.ResponseWriter, r *http.Request) {

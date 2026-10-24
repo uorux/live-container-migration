@@ -524,3 +524,21 @@ func TestWakeToken(t *testing.T) {
 		t.Errorf("wake calls %v", woke)
 	}
 }
+
+// `ctr images check` output as seen on carrack (2026-10-24): the record a failed pull left
+// behind, and the same image after a good import.
+func TestImageCheckComplete(t *testing.T) {
+	const img = "git.rooty.dev/minecraft/bettermc@sha256:b920f75ccbfe5e2148d73da2e02ec3680499961bee53bd79100d759813fb7e2b"
+	header := "REF TYPE DIGEST STATUS SIZE UNPACKED\n"
+	broken := header + img + " application/octet-stream sha256:b920f75ccbfe5e2148d73da2e02ec3680499961bee53bd79100d759813fb7e2b unavailable (0/?) 0.0 B ? false\n"
+	good := header + img + " application/vnd.docker.distribution.manifest.v2+json sha256:b920f75ccbfe5e2148d73da2e02ec3680499961bee53bd79100d759813fb7e2b complete (35/35) 1.2 GiB/1.2 GiB true\n"
+	other := header + "docker.io/library/busybox:1.37 application/vnd.oci.image.index.v1+json sha256:aa complete (2/2) 2.1 MiB/2.1 MiB true\n"
+	for name, c := range map[string]struct {
+		out  string
+		want bool
+	}{"broken record": {broken, false}, "complete": {good, true}, "absent": {other, false}, "empty": {"", false}} {
+		if got := imageCheckComplete(c.out, img); got != c.want {
+			t.Errorf("%s: got %v, want %v", name, got, c.want)
+		}
+	}
+}
