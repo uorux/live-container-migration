@@ -53,15 +53,15 @@ spec:
     staticConfig:
       targets: ["71.34.78.8:25565", "74.208.45.181:25565"]
       labels: {prober: aeon}
-  relabelConfigs:
-  - sourceLabels: [__param_target]
-    regex: "71\\.34\\.78\\.8:25565"
-    targetLabel: entry
-    replacement: router
-  - sourceLabels: [__param_target]
-    regex: "74\\.208\\.45\\.181:25565"
-    targetLabel: entry
-    replacement: type-6a
+      relabelingConfigs:
+      - sourceLabels: [__param_target]
+        regex: "71\\.34\\.78\\.8:25565"
+        targetLabel: entry
+        replacement: router
+      - sourceLabels: [__param_target]
+        regex: "74\\.208\\.45\\.181:25565"
+        targetLabel: entry
+        replacement: type-6a
 ---
 apiVersion: operator.victoriametrics.com/v1beta1
 kind: VMProbe
@@ -78,15 +78,15 @@ spec:
     staticConfig:
       targets: ["71.34.78.8:25565", "15.204.121.118:25565"]
       labels: {prober: type-6a}
-  relabelConfigs:
-  - sourceLabels: [__param_target]
-    regex: "71\\.34\\.78\\.8:25565"
-    targetLabel: entry
-    replacement: router
-  - sourceLabels: [__param_target]
-    regex: "15\\.204\\.121\\.118:25565"
-    targetLabel: entry
-    replacement: aeon
+      relabelingConfigs:
+      - sourceLabels: [__param_target]
+        regex: "71\\.34\\.78\\.8:25565"
+        targetLabel: entry
+        replacement: router
+      - sourceLabels: [__param_target]
+        regex: "15\\.204\\.121\\.118:25565"
+        targetLabel: entry
+        replacement: aeon
 ---
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
