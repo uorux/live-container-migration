@@ -413,6 +413,12 @@
               "--",
               "/bin/mc-start"
             ],
+            "env": [
+              {
+                "name": "MC_EXTRA_JVM_ARGS",
+                "value": "-XX:G1NewSizePercent=5 -XX:G1MaxNewSizePercent=15"
+              }
+            ],
             "resources": {
               "requests": {
                 "cpu": "500m",

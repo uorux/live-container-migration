@@ -56,6 +56,17 @@ LABELS = {
     "abyssalascent": "Abyssal Ascent",
 }
 
+# Extra JVM flags per pack (pod env MC_EXTRA_JVM_ARGS; mc-start puts them after the image's flags, so
+# they win). Young-generation cap for live migration: Aikar's G1NewSizePercent=30 /
+# G1MaxNewSizePercent=40 keep 3-4 GB of a 10 GB heap young, and a young gen is rewritten every
+# collection, so that much is dirty again each pre-copy round and lands in the final dump. Capped
+# at 15%, a measured Fabric server's final dump shrank 5-7x with no MSPT cost
+# (docs/jvm-migration-notes.md section 7). bettermc first, as those notes advise for big packs;
+# compare MSPT and GC logs over a play session before adding others.
+EXTRA_JVM_ARGS = {
+    "bettermc": "-XX:G1NewSizePercent=5 -XX:G1MaxNewSizePercent=15",
+}
+
 # The mc-whitelist ConfigMap's keys: whitelist.json-format lists and ops.json-format lists.
 LISTS = ["backend.json", "global.json", "bmc.json", "ops-global.json", "ops-bmc.json"]
 
@@ -152,6 +163,8 @@ def livepod(name, req, lim, wl, ops, modded, image):
                         "name": "mc",
                         "image": image,
                         "command": relay,
+                        **({"env": [{"name": "MC_EXTRA_JVM_ARGS", "value": EXTRA_JVM_ARGS[name]}]}
+                           if name in EXTRA_JVM_ARGS else {}),
                         "resources": {
                             # CPU requests only weight CPU under contention (no limit: a server bursts
                             # into whatever is free); 2 per pack let only ~3 packs be awake at once.
