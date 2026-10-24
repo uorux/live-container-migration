@@ -26,6 +26,8 @@ in
       wakeTokenFile = "/etc/lcm/wake-token";
       # The leading controller keeps this Secret holding the wake token (lab gateways can mount it).
       livePods.wakeTokenSecrets = [ "default/lcm-wake" ];
+      # Encrypted transfers (lcm migrate --transfer-network 192.168.100.0/24): TLS on 7791.
+      transportTLS = { enable = true; allowedCIDRs = [ "192.168.100.0/24" ]; };
     };
     environment.etc."lcm/token".text = "lab-token-not-secret"; # lab only: lands in the store
     environment.etc."lcm/wake-token".text = "lab-wake-token-not-secret";
