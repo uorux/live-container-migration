@@ -15,7 +15,7 @@ sinks:
       method: newline_delimited
     compression: gzip
     batch:
-      max_bytes: 1048576
+      max_bytes: 4194304
       timeout_secs: 5
     buffer:
       type: disk

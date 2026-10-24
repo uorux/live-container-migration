@@ -1,18 +1,41 @@
 # Insert-only VictoriaLogs ingest for hosts outside the cluster on the tailnet: the VPS ingresses'
 # Vector (live-container-migration deploy/standalone) posts to
 # https://logs-ingest.k8s.rooty.dev/insert/jsonline (*.k8s.rooty.dev is svc:k8s's tailnet
-# address). Tailnet clients reach Traefik through svc:k8s, which re-opens each connection from a
-# node's cilium_host address, so only those sources are allowed; traffic arriving through the
-# VPS HAProxy carries the real client address (PROXY protocol, #391) and is refused. Queries
-# stay behind Authelia (ingress.yaml).
+# address). Queries stay behind Authelia (ingress.yaml).
+#
+# No crowdsec-bouncer on this route, on purpose (like LLDAP's): log batches are full of
+# attack-looking strings (HAProxy/Traefik lines with /.env, log4j probes, ...). AppSec inspecting
+# them would flood WAF alerts, and in blocking mode drop exactly the logs that record attacks.
+#
+# Trust: no credential, so the tailnet is the boundary, the same as svc:k8s itself. Any tailnet
+# device can write any host/_SYSTEMD_UNIT (stream fields come from the client). Follow-up: a
+# VMAuth user per host that sets host server-side (VictoriaLogs extra_fields).
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
 metadata:
   name: tailnet-only
   namespace: logs
 spec:
+  # Tailnet clients reach Traefik through svc:k8s, which re-opens each connection from a node's
+  # cilium_host address, so only those sources are allowed. Public traffic is refused only
+  # because every public path into svc:k8s carries the client's address in a PROXY header (the
+  # VPS HAProxy's send-proxy-v2, #391): a future HAProxy backend to svc:k8s WITHOUT
+  # send-proxy-v2 would make public traffic look like cilium_host and open this endpoint to the
+  # internet. A rebuilt node gets a new cilium_host address: update this list together with
+  # #391's proxyProtocol.trustedIPs.
   ipAllowList:
     sourceRange: ["10.42.0.205/32", "10.42.2.167/32", "10.42.3.109/32"]
+---
+# Bounds what a tailnet client can push into the 30-day store per request (Vector batches are
+# capped at 4 MiB).
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: ingest-body-limit
+  namespace: logs
+spec:
+  buffering:
+    maxRequestBodyBytes: 16777216
 ---
 apiVersion: traefik.io/v1alpha1
 kind: IngressRoute
@@ -25,6 +48,7 @@ spec:
       kind: Rule
       middlewares:
         - name: tailnet-only
+        - name: ingest-body-limit
       services:
         - name: victoria-logs
           port: 9428
