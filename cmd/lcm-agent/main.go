@@ -112,8 +112,10 @@ func main() {
 		})
 	}
 	go a.FollowRestores(context.Background())
-	// Give the listener a moment, then finish or abort checkpoints a previous process left behind.
-	go func() { time.Sleep(time.Second); a.Recover(context.Background()) }()
+	// Finish or abort checkpoints a previous process left behind. Their statuses exist before the
+	// listener serves GET /v1/checkpoint/{id}; the decisions wait for leftover runc/CRIU in the
+	// background.
+	a.Recover(context.Background())
 	if *tlsListen != "" {
 		ln, err := net.Listen("tcp", *tlsListen)
 		if err != nil {
