@@ -22,7 +22,7 @@
           "app": "velero-backup-helper"
         },
         "annotations": {
-          "backup.velero.io/backup-volumes": "atm9,atm10,bettermc,evolution,ob2,sb4,skies2,p2haustian,dungeonheroes,integratedmc,abyssalascent,sdfs"
+          "backup.velero.io/backup-volumes": "atm9,atm10,bettermc,evolution,ob2,sb4,skies2,p2haustian,dungeonheroes,integratedmc,abyssalascent"
         }
       },
       "spec": {
@@ -103,11 +103,6 @@
                 "name": "abyssalascent",
                 "mountPath": "/data/abyssalascent",
                 "readOnly": true
-              },
-              {
-                "name": "sdfs",
-                "mountPath": "/data/sdfs",
-                "readOnly": true
               }
             ]
           }
@@ -187,13 +182,6 @@
             "name": "abyssalascent",
             "persistentVolumeClaim": {
               "claimName": "abyssalascent-data",
-              "readOnly": true
-            }
-          },
-          {
-            "name": "sdfs",
-            "persistentVolumeClaim": {
-              "claimName": "sdfs-data",
               "readOnly": true
             }
           }

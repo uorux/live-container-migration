@@ -22,8 +22,8 @@ OUT = "deploy/homelab/minecraft"
 # Memory: the plan's rule (Xmx + 2 GiB modded, + 1 GiB Fabric/Paper; limit + 1 GiB), checked
 # against the image agent's measured RSS at boot (atm9 8.3, atm10 7.2, evolution 5.5, skies2 4.6,
 # integratedmc 5.0, ob2 3.5, sb4 4.4-4.5 GiB; sb4 raised to 7 on the image agent's advice: its heap
-# wasn't full yet; p2haustian to 7: 4.34 GiB RSS after boot at -Xmx4G). PVC sizes are the plan's minimums: measure `du` of
-# /mc/<pack> on recusant before the cutover and raise any that don't fit 2x.
+# wasn't full yet; p2haustian to 7: 4.34 GiB RSS after boot at -Xmx4G). PVC sizes: at least 2x `du --apparent-size /mc/<pack>` on recusant (2026-10-24: sdfs 66G of
+# worlds, atm9 and bettermc 9.2G, the rest 1-2.4G).
 PACKS = [
     # name            req lim  pvc  whitelist      ops               modded
     ("atm9",          12, 13,  30, "backend.json", "ops-global.json", True),
@@ -37,7 +37,8 @@ PACKS = [
     ("dungeonheroes",  5,  6,  15, "backend.json", "ops-global.json", False),
     ("integratedmc",  10, 11,  20, "backend.json", "ops-global.json", True),
     ("abyssalascent", 10, 11,  20, "backend.json", "ops-global.json", True),
-    ("sdfs",           7,  8,  30, "global.json",  "ops-global.json", False),
+    # sdfs (Paper, 66G of worlds) stays on recusant for now (Jacob, 2026-10-24); no image yet.
+    # ("sdfs",         7,  8, 150, "global.json",  "ops-global.json", False),
 ]
 
 # Menu display names (from the image agent); the gateways take them as -label / LCM_LABELS, printed
