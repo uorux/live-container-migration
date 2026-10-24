@@ -183,7 +183,11 @@ pre-dumps. To resolve it on the source node:
 
 - Transfers are zstd-compressed (JVM heap pages compress 6-8x); on links slower than ~1 GB/s
   this is the single biggest factor for pre-copy convergence and the final ship.
-- `--predump-max` / `--predump-target`: more rounds help only while each round shrinks.
+- `--predump-max` (default 12) / `--predump-target` (64 MiB): pre-copy stops at the first round
+  under the target, or after two rounds in a row that don't beat the smallest so far by 10%. One
+  such round isn't enough, since a garbage collection landing in it can make it as big as the
+  last. The final dump is roughly what the workload dirties during the last round, so a JVM server
+  gains from every round that still shrinks.
 - `--transfer-network CIDR` (env `LCM_TRANSFER_NETWORK`): ship over agent addresses in this
   network instead of the node InternalIPs (e.g. a LAN faster than the tailnet), encrypted; see
   "Encrypted transfers over a LAN" below.

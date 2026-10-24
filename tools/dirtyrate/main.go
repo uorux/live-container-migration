@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"lcm/internal/api"
 	"lcm/internal/stage"
 )
 
@@ -94,7 +95,7 @@ func main() {
 	flag.StringVar(&f.jsonOut, "json", "", "also write intervals and summary as JSON to this file")
 	flag.StringVar(&bw, "bw", "", "predict lcm pre-copy rounds at this dump+ship rate in bytes/s (e.g. 60M, 180M)")
 	flag.DurationVar(&f.overhead, "overhead", time.Second, "fixed per-round cost for -bw (CRIU start, freeze, http)")
-	flag.IntVar(&f.rounds, "rounds", 4, "max pre-dump rounds for -bw (lcm migrate -predump-max)")
+	flag.IntVar(&f.rounds, "rounds", api.DefaultPreDumpMax, "max pre-dump rounds for -bw (lcm migrate -predump-max)")
 	flag.StringVar(&target, "target", "64M", "pre-copy stop size for -bw (lcm migrate -predump-target)")
 	flag.BoolVar(&f.force, "force", false, "skip the in-progress-migration check (see the warning above)")
 	flag.Usage = func() {

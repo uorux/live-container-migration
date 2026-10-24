@@ -52,7 +52,7 @@ func main() {
 	ctr := fs.String("container", "", "container to migrate (default: the only one)")
 	tokenFile := fs.String("token-file", envOr("LCM_TOKEN_FILE", "/run/lcm/token"), "agent bearer token file")
 	kubeconfig := fs.String("kubeconfig", os.Getenv("KUBECONFIG"), "kubeconfig (default: in-cluster or ~/.kube/config)")
-	preMax := fs.Int("predump-max", 8, "max pre-copy rounds (they stop early once a round shrinks by less than 10%, or the destination's memory couldn't hold another)")
+	preMax := fs.Int("predump-max", api.DefaultPreDumpMax, "max pre-copy rounds (they stop early once two rounds in a row fail to beat the smallest so far by 10%, or the destination's memory couldn't hold another)")
 	preTarget := fs.Int64("predump-target", 64<<20, "stop pre-copy once a round is smaller than this many bytes")
 	relay := fs.String("relay", "auto", "lcm-relay handshake: auto, required, off")
 	waitImage := fs.String("wait-image", "", "image for the destination's wait init container (default busybox)")

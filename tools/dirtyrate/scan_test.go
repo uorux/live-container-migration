@@ -288,9 +288,10 @@ func TestPredictRounds(t *testing.T) {
 	if final < 8-1e-9 || final > 8+1e-9 {
 		t.Fatalf("final %v want 8", final)
 	}
-	// A dirty rate above the link rate doesn't converge: stops when a round stops shrinking.
-	rounds, _, _ = predictRounds(5000, D, 1, 50, 0, 4, 64)
-	if len(rounds) != 3 || rounds[1] != 1000 || rounds[2] != 1000 {
+	// A dirty rate above the link rate doesn't converge: stops after two rounds in a row that
+	// don't shrink (api.PreCopyProgress).
+	rounds, _, _ = predictRounds(5000, D, 1, 50, 0, 8, 64)
+	if len(rounds) != 4 || rounds[1] != 1000 || rounds[3] != 1000 {
 		t.Fatalf("rounds %v", rounds)
 	}
 }

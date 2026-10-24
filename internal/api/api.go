@@ -36,7 +36,7 @@ type CheckpointRequest struct {
 }
 
 // PreDumpPolicy controls iterative pre-copy: pre-dump and ship memory while the workload runs,
-// until the dirty set is small enough or stops shrinking.
+// until the dirty set is small enough or stops shrinking (PreCopyProgress).
 type PreDumpPolicy struct {
 	Max         int   `json:"max"`         // maximum pre-dump rounds (0 = no pre-copy)
 	TargetBytes int64 `json:"targetBytes"` // stop once a round dumps fewer bytes than this

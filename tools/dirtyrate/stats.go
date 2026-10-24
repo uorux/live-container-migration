@@ -4,6 +4,8 @@ package main
 
 import (
 	"sort"
+
+	"lcm/internal/api"
 )
 
 type pageKey struct {
@@ -127,10 +129,10 @@ func dirtyAfter(D []float64, dt, t float64) (v float64, capped bool) {
 
 // predictRounds mirrors lcm-agent's pre-copy loop (internal/agent/source.go): round 1 ships all
 // resident memory; each later round ships what was dirtied while the previous one was dumped and
-// shipped (its size / bw + overhead seconds); stop after max rounds, below target, or when a
-// round doesn't shrink. The final dump carries what was dirtied during the last round.
+// shipped (its size / bw + overhead seconds); stop after max rounds or by lcm's own rule
+// (api.PreCopyProgress). The final dump carries what was dirtied during the last round.
 func predictRounds(resident float64, D []float64, dt, bw, overhead float64, max int, target float64) (rounds []float64, final float64, capped bool) {
-	prev := -1.0
+	progress := api.PreCopyProgress{TargetBytes: int64(target)}
 	for r := 1; r <= max; r++ {
 		size := resident
 		if r > 1 {
@@ -139,10 +141,9 @@ func predictRounds(resident float64, D []float64, dt, bw, overhead float64, max 
 			capped = capped || c
 		}
 		rounds = append(rounds, size)
-		if size < target || (prev >= 0 && size >= prev) {
+		if progress.Done(int64(size)) {
 			break
 		}
-		prev = size
 	}
 	final, c := dirtyAfter(D, dt, rounds[len(rounds)-1]/bw+overhead)
 	return rounds, final, capped || c

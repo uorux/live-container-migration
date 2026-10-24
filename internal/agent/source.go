@@ -155,6 +155,7 @@ func (a *Agent) checkpoint(ctx context.Context, req api.CheckpointRequest, emit 
 	parent := ""
 	var prevBytes int64 = -1
 	var prevRate float64 // bytes/s of the previous round (dump + ship)
+	progress := api.PreCopyProgress{TargetBytes: req.PreDump.TargetBytes}
 	var lastBytes int64 = -1
 	for round := 1; round <= req.PreDump.Max; round++ {
 		if err := ctx.Err(); err != nil {
@@ -213,8 +214,8 @@ func (a *Agent) checkpoint(ctx context.Context, req api.CheckpointRequest, emit 
 		emit(api.Event{Phase: "predump", Round: round, Bytes: size, Millis: r.DumpMS + r.ShipMS,
 			Message: fmt.Sprintf("dump %dms ship %dms", r.DumpMS, r.ShipMS)})
 		parent, lastBytes = name, size
-		if size < req.PreDump.TargetBytes || (prevBytes >= 0 && size*10 >= prevBytes*9) {
-			break // converged, or shrinking by less than 10%: the dirty rate keeps up with us
+		if progress.Done(size) {
+			break // converged, or stalled: the dirty rate keeps up with us
 		}
 		prevBytes = size
 	}
