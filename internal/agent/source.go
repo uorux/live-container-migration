@@ -56,12 +56,21 @@ func (a *Agent) checkpoint(ctx context.Context, req api.CheckpointRequest, emit 
 			os.RemoveAll(dir)
 		}
 	}()
-	if err := writeJSON(filepath.Join(dir, "request.json"), persisted{Request: req, Upper: upper, Pid: st.Pid}); err != nil {
-		return nil, err
-	}
 	dst := a.stagingClient(req.DestURL, req.DestKey)
 	if err := dst.reset(ctx); err != nil {
-		return nil, fmt.Errorf("destination agent: %w", err)
+		if req.DestFallbackURL == "" || req.DestFallbackURL == req.DestURL {
+			return nil, fmt.Errorf("destination agent: %w", err)
+		}
+		emit(api.Event{Phase: "precopy", Message: fmt.Sprintf("warning: the destination doesn't answer at %s (%v); shipping to %s instead", req.DestURL, err, req.DestFallbackURL)})
+		req.DestURL = req.DestFallbackURL
+		dst = a.stagingClient(req.DestURL, req.DestKey)
+		if err := dst.reset(ctx); err != nil {
+			return nil, fmt.Errorf("destination agent: %w", err)
+		}
+	}
+	// After the destination is settled: an agent restarting mid-migration finishes from this.
+	if err := writeJSON(filepath.Join(dir, "request.json"), persisted{Request: req, Upper: upper, Pid: st.Pid}); err != nil {
+		return nil, err
 	}
 	if dst.encoding(ctx) == "" {
 		emit(api.Event{Phase: "precopy", Message: "the destination agent predates compressed transfers; shipping uncompressed (upgrade it)"})
