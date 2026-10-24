@@ -153,7 +153,9 @@ def livepod(name, req, lim, wl, ops, modded, image):
                         "image": image,
                         "command": relay,
                         "resources": {
-                            "requests": {"cpu": "2" if modded else "1", "memory": f"{req}Gi"},
+                            # CPU requests only weight CPU under contention (no limit: a server bursts
+                            # into whatever is free); 2 per pack let only ~3 packs be awake at once.
+                            "requests": {"cpu": "500m" if modded else "250m", "memory": f"{req}Gi"},
                             "limits": {"memory": f"{lim}Gi"},
                         },
                         "ports": [
