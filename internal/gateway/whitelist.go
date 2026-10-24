@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -84,6 +85,20 @@ func ParseWhitelist(spec string, log *slog.Logger) (*Whitelist, error) {
 		}
 	}
 	return w, nil
+}
+
+// Backends returns the backend names the whitelist has lists for ("*" for
+// the default).
+func (w *Whitelist) Backends() []string {
+	if w == nil {
+		return nil
+	}
+	var names []string
+	for n := range w.files {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // Allowed reports whether a player may wake backend. A backend with no list

@@ -162,6 +162,18 @@ func main() {
 		}
 		wake = gateway.HTTPWaker(urls, wt)
 	}
+	if mc != nil {
+		known := map[string]bool{"*": true, *backend: true}
+		for _, b := range extra {
+			known[b] = true
+		}
+		for _, b := range mc.Whitelist.Backends() {
+			if !known[b] {
+				fmt.Fprintf(os.Stderr, "lcm-gateway: -whitelist names %q, which is not a backend (-backend/-backends) or *\n", b)
+				os.Exit(2)
+			}
+		}
+	}
 	g := gateway.New(gateway.Config{
 		Wake:        wake,
 		AcceptProxy: trusted,
