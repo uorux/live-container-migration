@@ -100,7 +100,7 @@
           },
           {
             "alert": "MinecraftPlayerOnline",
-            "expr": "mc_player_list{job=\"minecraft-mc-exporter\"} > 0",
+            "expr": "(mc_player_list{job=\"minecraft-mc-exporter\"} > 0) or (mc_player_online{job=\"minecraft-mc-exporter\"} > 0)",
             "labels": {
               "severity": "info",
               "channel": "discord-mc"
@@ -112,7 +112,7 @@
           },
           {
             "alert": "MinecraftLowTPS",
-            "expr": "clamp_max(1 / (rate(mc_server_tick_seconds_sum{job=\"minecraft-mc-exporter\"}[5m]) / rate(mc_server_tick_seconds_count{job=\"minecraft-mc-exporter\"}[5m])), 20) < 15",
+            "expr": "(clamp_max(1 / (rate(mc_server_tick_seconds_sum{job=\"minecraft-mc-exporter\"}[5m]) / rate(mc_server_tick_seconds_count{job=\"minecraft-mc-exporter\"}[5m])), 20) < 15) or (mc_tps{job=\"minecraft-mc-exporter\"} < 15)",
             "for": "5m",
             "labels": {
               "severity": "warning"

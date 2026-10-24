@@ -1826,7 +1826,7 @@
         "containers": [
           {
             "name": "mc",
-            "image": "MISSING-DIGEST/sdfs",
+            "image": "git.rooty.dev/minecraft/sdfs@sha256:9ad3e23743b0b9cb4703574538b96167feb24a2542e1eba3f0057e7a29d754e3",
             "command": [
               "/lcm/lcm-relay",
               "run",

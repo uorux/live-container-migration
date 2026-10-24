@@ -274,14 +274,16 @@ STATIC = {
              # the modded servers' exporter lists players (mc_player_list{name,...}). Retire the
              # recusant rule (recusant-minecraft-alerts.yaml) together with Velocity.
              {"alert": "MinecraftPlayerOnline",
-              "expr": 'mc_player_list{job="minecraft-mc-exporter"} > 0',
+              # Modded: mc_player_list{name}; sdfs: mc_player_online{name} (sladkoff, player_online on).
+              "expr": '(mc_player_list{job="minecraft-mc-exporter"} > 0) or (mc_player_online{job="minecraft-mc-exporter"} > 0)',
               "labels": {"severity": "info", "channel": "discord-mc"},
               "annotations": {"summary": "Minecraft player online",
                               "description": "{{ $labels.name }} is online on {{ $labels.server }}."}},
              # recusant's MinecraftLowTPS read mc_tps, which the exporter (1.2.1) doesn't have, so
              # it never fired: TPS from the mean tick time instead (66 ms per tick = 15 TPS).
              {"alert": "MinecraftLowTPS",
-              "expr": 'clamp_max(1 / (rate(mc_server_tick_seconds_sum{job="minecraft-mc-exporter"}[5m]) / rate(mc_server_tick_seconds_count{job="minecraft-mc-exporter"}[5m])), 20) < 15',
+              # Modded (cpburnz): from the tick histogram. sdfs (Paper, sladkoff): its real mc_tps.
+              "expr": '(clamp_max(1 / (rate(mc_server_tick_seconds_sum{job="minecraft-mc-exporter"}[5m]) / rate(mc_server_tick_seconds_count{job="minecraft-mc-exporter"}[5m])), 20) < 15) or (mc_tps{job="minecraft-mc-exporter"} < 15)',
               "for": "5m",
               "labels": {"severity": "warning"},
               "annotations": {"summary": "{{ $labels.server }} is at {{ $value | printf \"%.1f\" }} TPS",
