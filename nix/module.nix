@@ -102,6 +102,17 @@ in
         example = [ "10.0.0.0/24" ];
         description = "Source networks allowed to reach the TLS port regardless of interface.";
       };
+      transferNetwork = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "10.0.0.0/24";
+        description = ''
+          Default `--transfer-network` for `lcm migrate`/`lcm drain` run on this node (exported as
+          LCM_TRANSFER_NETWORK). Migrations ship over the destination's address in it when both
+          agents serve the TLS transport, and over the InternalIPs otherwise or when it doesn't
+          answer, so it is safe while nodes are rolled out one at a time.
+        '';
+      };
     };
     stagingSize = mkOption {
       type = types.str;
@@ -277,6 +288,9 @@ in
     };
 
     environment.systemPackages = [ cfg.package cfg.criuPackage ];
+    environment.variables = lib.mkIf (tls.enable && tls.transferNetwork != null) {
+      LCM_TRANSFER_NETWORK = tls.transferNetwork;
+    };
     networking.firewall.interfaces = lib.mkMerge ([ (lib.genAttrs cfg.firewallInterfaces (_: { allowedTCPPorts = [ cfg.port ]; })) ]
       ++ lib.optional tls.enable (lib.genAttrs tls.firewallInterfaces (_: { allowedTCPPorts = [ tls.port ]; })));
     networking.firewall.extraInputRules = lib.mkIf (config.networking.nftables.enable && cidrRules != [ ]) (lib.concatMapStrings

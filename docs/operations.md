@@ -202,7 +202,10 @@ services.lcm.transportTLS = {
 };
 ```
 
-and migrate with `--transfer-network 10.0.0.0/24`. Agents then also serve their API over TLS 1.3
+and migrate with `--transfer-network 10.0.0.0/24` (or set `transportTLS.transferNetwork =
+"10.0.0.0/24"` to make it the default for `lcm` on the nodes). If the destination's transfer
+address doesn't answer (its port isn't open yet, say), the source ships over the InternalIPs
+instead, with a warning. Agents then also serve their API over TLS 1.3
 on port 7791 with a key every node derives from the agent token: each end accepts only a peer
 presenting that exact key, so there is no CA and nothing to distribute or renew, and someone on
 the LAN without the token can't read, alter or impersonate either end. Requests still carry the
