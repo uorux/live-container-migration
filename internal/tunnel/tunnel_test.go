@@ -144,12 +144,15 @@ func TestGatewayNewSession(t *testing.T) {
 	// Before any relay: players queue up.
 	p1 := addFake(s, 1, []byte("early"), 0, 0)
 	p1.openPending = true
-	ack := s.gatewayAccept(fakeConn(s), &wire.Hello{Session: [16]byte{1}, Window: 1 << 20})
+	c := fakeConn(s)
+	ack := s.gatewayAccept(c, &wire.Hello{Session: [16]byte{1}, Window: 1 << 20})
 	if ack.Status != wire.AckNew || p1.closed || !p1.openPending {
 		t.Fatal("first relay: status", ack.Status, p1.closed, p1.openPending)
 	}
-	// Simulate that OPEN 1 went out; player 2 arrives during an outage.
+	// Simulate that OPEN 1 went out and the relay ran the connection (it
+	// sent something); player 2 arrives during an outage.
 	p1.openPending, p1.everOpened = false, true
+	s.handleFrame(c, wire.Frame{Type: wire.TPing, Payload: wire.PingPayload(1)})
 	p2 := addFake(s, 2, nil, 0, 0)
 	p2.openPending = true
 	// Relay restarted with a new session id.
@@ -168,22 +171,28 @@ func TestGatewayNewSession(t *testing.T) {
 	}
 }
 
-// TestGatewayRebind: a GOAWAY with GoAwayRebind as the first frame on a
-// connection answered NEW turns the streams opened on it back into
-// never-opened ones, which the next session (new id) keeps; anywhere else
-// the flag changes nothing.
+// TestGatewayRebind: a relay that presents an unknown id after a connection
+// answered NEW that it never used (no frame but a REBIND GOAWAY) never saw the
+// OPENs sent there: those streams are opened again on the new session rather
+// than reset, however the old connection's GOAWAY and the new HELLO are
+// ordered, and only once. A used connection, or one that resumed, keeps the
+// old rule: opened streams are reset.
 func TestGatewayRebind(t *testing.T) {
 	rebind := wire.Frame{Type: wire.TGoAway, Payload: wire.GoAwayPayload(wire.GoAwayRebind, "new session id")}
 	ping := wire.Frame{Type: wire.TPing, Payload: wire.PingPayload(1)}
 	for _, tc := range []struct {
-		name     string
-		resumed  bool
-		pingSent bool
-		unopened bool
+		name    string
+		resumed bool // the old connection resumed rather than answered NEW
+		ping    bool // the relay sent a PING on it (it ran the connection)
+		goaway  int  // REBIND GOAWAY: 0 none, 1 read before the new HELLO, 2 after it
+		detach  bool // the old connection was detached before the new HELLO
+		reopen  bool
 	}{
-		{"first frame after NEW", false, false, true},
-		{"after another frame", false, true, false},
-		{"on a resumed connection", true, false, false},
+		{name: "GOAWAY first", goaway: 1, detach: true, reopen: true},
+		{name: "new HELLO before the GOAWAY is read", goaway: 2, reopen: true},
+		{name: "no GOAWAY (relay restarted)", detach: true, reopen: true},
+		{name: "relay used the connection", ping: true, goaway: 1, detach: true},
+		{name: "old connection resumed", resumed: true, goaway: 1, detach: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := NewSession(RoleGateway, testCfg(), [16]byte{}, nil)
@@ -195,21 +204,35 @@ func TestGatewayRebind(t *testing.T) {
 			c := fakeConn(s)
 			s.gatewayAccept(c, &wire.Hello{Session: [16]byte{1}, Window: 1 << 20})
 			s.mu.Lock()
-			p.openPending, p.everOpened = false, true // OPEN 1 went out on c
+			p.openPending, p.everOpened, p.txNext = false, true, 5 // OPEN 1 and its data went out on c
 			s.mu.Unlock()
-			if tc.pingSent {
+			if tc.ping {
 				s.handleFrame(c, ping)
 			}
-			if err := s.handleFrame(c, rebind); err != errGoAway {
-				t.Fatal("GOAWAY must end the connection:", err)
+			if tc.goaway == 1 {
+				if err := s.handleFrame(c, rebind); err != errGoAway {
+					t.Fatal("GOAWAY must end the connection:", err)
+				}
 			}
-			if p.closed || p.everOpened == tc.unopened || p.openPending != tc.unopened {
-				t.Fatalf("closed %v everOpened %v openPending %v", p.closed, p.everOpened, p.openPending)
+			if tc.detach {
+				s.detach(c)
 			}
-			s.detach(c)
 			s.gatewayAccept(fakeConn(s), &wire.Hello{Session: [16]byte{2}, Window: 1 << 20})
-			if p.closed == tc.unopened {
-				t.Fatalf("on the new session: closed %v, want %v", p.closed, !tc.unopened)
+			if tc.goaway == 2 {
+				if err := s.handleFrame(c, rebind); err != errDetached {
+					t.Fatal("late GOAWAY on a replaced connection:", err)
+				}
+			}
+			if tc.reopen {
+				if p.closed || p.everOpened || !p.openPending || p.txNext != 0 {
+					t.Fatalf("want reopened from 0: closed %v everOpened %v openPending %v txNext %d",
+						p.closed, p.everOpened, p.openPending, p.txNext)
+				}
+				if s.NumStreams() != 1 {
+					t.Fatalf("%d streams, want 1", s.NumStreams())
+				}
+			} else if !p.closed {
+				t.Fatal("stream opened on the old session must be reset")
 			}
 		})
 	}
@@ -461,6 +484,16 @@ func TestRelayNewIDAfterUnknownSession(t *testing.T) {
 	p.gw.AddStream(gwLocalA, wire.Open{})
 	upA := <-p.upstreams
 	defer upA.Close()
+	// The relay uses the connection: data goes through and is acknowledged.
+	playerA.Write([]byte("hi"))
+	upA.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := io.ReadFull(upA, make([]byte, 2)); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for p.gw.Stats().TxBuffered != 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
 	p.drop()
 	oldID := p.rl.ID()
 

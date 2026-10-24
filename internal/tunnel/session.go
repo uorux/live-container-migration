@@ -221,6 +221,7 @@ type Session struct {
 	order   []uint32 // ascending stream ids
 	rr      int
 	conn    *Conn
+	last    *Conn // the connection attached most recently (may be gone)
 	// peerWindow is the per-stream window the peer advertised.
 	peerWindow uint64
 	nextID     uint32 // gateway: next stream id to allocate
@@ -707,7 +708,9 @@ func (s *Session) handleFrame(c *Conn, f wire.Frame) error {
 	if s.conn != c {
 		return errDetached
 	}
-	c.frames++
+	if f.Type != wire.TGoAway {
+		c.used = true
+	}
 	switch f.Type {
 	case wire.TPing:
 		c.ctrl = wire.AppendFrame(c.ctrl, wire.TPong, 0, f.Payload)
@@ -814,6 +817,9 @@ func (s *Session) handleFrame(c *Conn, f wire.Frame) error {
 			return err
 		}
 		s.log.Info("peer going away", "final", flags&wire.GoAwayFinal != 0, "reason", msg)
+		if flags&wire.GoAwayRebind == 0 {
+			c.used = true
+		}
 		if flags&wire.GoAwayFinal != 0 && s.role == RoleGateway {
 			s.stats.PeerExited = true
 			for _, id := range slices.Clone(s.order) {
@@ -821,9 +827,6 @@ func (s *Session) handleFrame(c *Conn, f wire.Frame) error {
 					s.peerForgot(st)
 				}
 			}
-		}
-		if flags&wire.GoAwayRebind != 0 && s.role == RoleGateway && c.answeredNew && c.frames == 1 {
-			s.unopenLocked()
 		}
 		return errGoAway
 	default:
@@ -988,16 +991,31 @@ func (s *Session) gatewayAccept(c *Conn, h *wire.Hello) wire.HelloAck {
 	status := uint8(wire.AckResumed)
 	if !s.bound || h.Session != s.id {
 		status = wire.AckNew
-		reset := 0
+		// The previous connection was answered NEW too, and the relay never
+		// used it (no frame but a REBIND GOAWAY): it never saw the OPENs sent
+		// there, which are all of the opened streams (that NEW reset the
+		// rest). Whether it then renewed its id (Session.renewID) or
+		// restarted, offer those streams again instead of resetting them.
+		// Decided here, under the lock, so it doesn't matter whether that
+		// connection's GOAWAY was read before this connection arrived.
+		unused := s.last != nil && s.last.answeredNew && !s.last.used
+		reset, reopened := 0, 0
 		for _, id := range slices.Clone(s.order) {
-			if st := s.streams[id]; st.everOpened {
-				s.removeStream(st, true, CloseSessionLost)
-				reset++
+			st := s.streams[id]
+			if !st.everOpened {
+				continue
 			}
+			if unused && st.txBase == 0 && st.rxNext == 0 && st.localErr == "" && !st.peerGone {
+				st.everOpened = false // opened again below, from offset 0
+				reopened++
+				continue
+			}
+			s.removeStream(st, true, CloseSessionLost)
+			reset++
 		}
 		if s.bound {
 			s.log.Warn("relay presented a new session; old streams reset",
-				"old", fmt.Sprintf("%x", s.id), "new", fmt.Sprintf("%x", h.Session), "reset", reset)
+				"old", fmt.Sprintf("%x", s.id), "new", fmt.Sprintf("%x", h.Session), "reset", reset, "reopened", reopened)
 		}
 		s.id = h.Session
 		s.bound = true
@@ -1045,32 +1063,6 @@ func (s *Session) gatewayAccept(c *Conn, h *wire.Hello) wire.HelloAck {
 	c.answeredNew = status == wire.AckNew
 	s.attachLocked(c, status == wire.AckResumed, outage)
 	return wire.HelloAck{Status: status, Window: uint32(s.cfg.Window), Streams: entries}
-}
-
-// unopenLocked handles a relay that hung up a connection answered with NEW
-// before processing anything on it, to come back with a new session id (see
-// Session.renewID): it never saw the OPENs sent on that connection, so those
-// streams are offered again, as never opened, on the next one. (Streams
-// opened on earlier connections were reset when this one was answered NEW.)
-// Caller holds s.mu.
-func (s *Session) unopenLocked() {
-	n := 0
-	for _, id := range slices.Clone(s.order) {
-		st := s.streams[id]
-		if !st.everOpened {
-			continue
-		}
-		if st.localErr != "" {
-			s.removeStream(st, true, CloseLocalError) // the relay does not know this stream
-			continue
-		}
-		st.everOpened, st.openPending = false, true
-		st.txNext, st.finSent = 0, false
-		n++
-	}
-	if n > 0 {
-		s.log.Info("relay is coming back with a new session id; its streams will be opened again", "streams", n)
-	}
 }
 
 // relayApply reconciles the session with the gateway's HELLO_ACK and attaches c.
@@ -1159,6 +1151,7 @@ func (s *Session) outageLocked() time.Duration {
 
 func (s *Session) attachLocked(c *Conn, resumed bool, outage time.Duration) {
 	s.conn = c
+	s.last = c
 	s.stats.PeerExited = false
 	s.ackFlush = true
 	s.stats.Connects++
