@@ -100,9 +100,10 @@
           },
           {
             "alert": "MinecraftPlayerOnline",
-            "expr": "(mc_player_list{job=\"minecraft-mc-exporter\"} > 0) or (mc_player_online{job=\"minecraft-mc-exporter\"} > 0)",
+            "expr": "max by (server, name) (mc_player_list{job=\"minecraft-mc-exporter\"} > 0) or max by (server, name) (mc_player_online{job=\"minecraft-mc-exporter\"} > 0)",
+            "keep_firing_for": "2m",
             "labels": {
-              "severity": "info",
+              "severity": "none",
               "channel": "discord-mc"
             },
             "annotations": {

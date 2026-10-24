@@ -291,8 +291,15 @@ STATIC = {
              # recusant rule (recusant-minecraft-alerts.yaml) together with Velocity.
              {"alert": "MinecraftPlayerOnline",
               # Modded: mc_player_list{name}; sdfs: mc_player_online{name} (sladkoff, player_online on).
-              "expr": '(mc_player_list{job="minecraft-mc-exporter"} > 0) or (mc_player_online{job="minecraft-mc-exporter"} > 0)',
-              "labels": {"severity": "info", "channel": "discord-mc"},
+              # Aggregated to (server, name): the raw series carry the pod, which changes on every
+              # wake and migration, and each change resolved the alert and fired a new one.
+              "expr": 'max by (server, name) (mc_player_list{job="minecraft-mc-exporter"} > 0)'
+                      ' or max by (server, name) (mc_player_online{job="minecraft-mc-exporter"} > 0)',
+              # Rides over a migration's blackout and single failed scrapes.
+              "keep_firing_for": "2m",
+              # Not "info": the chart's InfoInhibitor mutes info alerts in any namespace with no
+              # warning firing, which in minecraft is nearly always.
+              "labels": {"severity": "none", "channel": "discord-mc"},
               "annotations": {"summary": "Minecraft player online",
                               "description": "{{ $labels.name }} is online on {{ $labels.server }}."}},
              # recusant's MinecraftLowTPS read mc_tps, which the exporter (1.2.1) doesn't have, so
