@@ -28,9 +28,10 @@ import (
 type stagingClient struct {
 	base, key, token string
 
-	mu    sync.Mutex
-	known bool
-	enc   string // Content-Encoding the receiver decodes: "zstd" or "" (plain)
+	mu       sync.Mutex
+	known    bool
+	enc      string // Content-Encoding the receiver decodes: "zstd" or "" (plain)
+	dedupErr string // the receiver's last staging dedup failure, see takeDedupError
 }
 
 // encoding returns the Content-Encoding to send, asking the receiving agent once. Agents from
@@ -100,6 +101,11 @@ func (c *stagingClient) doEnc(ctx context.Context, method, path string, body io.
 		return err
 	}
 	defer resp.Body.Close()
+	if e := resp.Header.Get(dedupErrorHeader); e != "" {
+		c.mu.Lock()
+		c.dedupErr = e
+		c.mu.Unlock()
+	}
 	if resp.StatusCode/100 != 2 {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return fmt.Errorf("%s %s: %s: %s", method, path, resp.Status, strings.TrimSpace(string(msg)))
@@ -109,7 +115,17 @@ func (c *stagingClient) doEnc(ctx context.Context, method, path string, body io.
 
 // stagingFree returns the receiver's free staging space, or -1 if it doesn't say (an older agent,
 // or it can't be asked right now).
-func (c *stagingClient) stagingFree(ctx context.Context) int64 {
+func (c *stagingClient) stagingFree(ctx context.Context) int64 { return c.info(ctx, "stagingFree") }
+
+// memAvailable returns the receiver's MemAvailable (staged images already count against it:
+// they're on a tmpfs), or -1 if it doesn't say.
+func (c *stagingClient) memAvailable(ctx context.Context) int64 { return c.info(ctx, "memAvailable") }
+
+// memTotal returns the receiver's MemTotal, or -1 if it doesn't say.
+func (c *stagingClient) memTotal(ctx context.Context) int64 { return c.info(ctx, "memTotal") }
+
+// info returns one numeric field of the receiver's /v1/info, or -1.
+func (c *stagingClient) info(ctx context.Context, field string) int64 {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(c.base, "/")+"/v1/info", nil)
 	if err != nil {
 		return -1
@@ -120,13 +136,15 @@ func (c *stagingClient) stagingFree(ctx context.Context) int64 {
 		return -1
 	}
 	defer resp.Body.Close()
-	var info struct {
-		StagingFree *int64 `json:"stagingFree"`
-	}
-	if resp.StatusCode/100 != 2 || json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&info) != nil || info.StagingFree == nil {
+	var info map[string]json.RawMessage
+	if resp.StatusCode/100 != 2 || json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&info) != nil {
 		return -1
 	}
-	return *info.StagingFree
+	var n int64
+	if v, ok := info[field]; !ok || json.Unmarshal(v, &n) != nil || n < 0 {
+		return -1
+	}
+	return n
 }
 
 func (c *stagingClient) reset(ctx context.Context) error {
@@ -226,4 +244,13 @@ func writeTar(w io.Writer, dir string) error {
 		return err
 	}
 	return tw.Close()
+}
+
+// takeDedupError returns (and clears) the receiver's last staging dedup failure.
+func (c *stagingClient) takeDedupError() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e := c.dedupErr
+	c.dedupErr = ""
+	return e
 }

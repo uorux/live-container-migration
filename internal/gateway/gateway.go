@@ -341,7 +341,11 @@ func (g *Gateway) ServeTunnel(ln net.Listener) error {
 			time.Sleep(50 * time.Millisecond)
 			continue
 		}
+		// Tracked before the forward check: a step-down that sets RefuseTunnels and then calls
+		// DropTunnels either finds this conn in the map or this check sees the new setting.
+		g.tunnels.Store(c, struct{}{})
 		if fwd := g.tunnelForward.Load(); fwd != nil {
+			g.tunnels.Delete(c)
 			if *fwd == RefuseTunnels {
 				c.Close()
 			} else {
@@ -400,8 +404,7 @@ func forwardTunnel(c net.Conn, addr string, log *slog.Logger) {
 }
 
 func (g *Gateway) handleTunnel(nc net.Conn) {
-	g.tunnels.Store(nc, struct{}{})
-	defer g.tunnels.Delete(nc)
+	defer g.tunnels.Delete(nc) // stored by ServeTunnel
 	conn, err := tunnel.ServerHandshake(nc, g.cfg.Tunnel.Token, g.cfg.Tunnel.HandshakeTimeout, g.lookup)
 	if err != nil {
 		g.log.Warn("tunnel handshake failed", "remote", nc.RemoteAddr().String(), "err", err)

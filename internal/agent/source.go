@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -107,10 +108,12 @@ func (a *Agent) checkpoint(ctx context.Context, req api.CheckpointRequest, emit 
 	// It goes out before the pre-dump round expected to finish within finalLead, or at the latest
 	// right before the freeze.
 	finalSent := false
+	var finalAt time.Time
 	sendFinal := func() error {
 		if finalSent {
 			return nil
 		}
+		finalAt = time.Now()
 		if err := os.WriteFile(filepath.Join(dir, "FINAL"), nil, 0o644); err != nil {
 			return err
 		}
@@ -120,7 +123,23 @@ func (a *Agent) checkpoint(ctx context.Context, req api.CheckpointRequest, emit 
 		finalSent = true
 		return nil
 	}
-	anon, _ := containerAnon(ctx, req.ContainerID)
+	anon, err := containerAnon(ctx, req.ContainerID)
+	if err != nil || anon <= 0 {
+		anon = -1
+		emit(api.Event{Phase: "predump", Message: fmt.Sprintf("warning: can't read the container's memory (%v); sizing the destination budget from the first pre-dump", err)})
+	}
+	// restored estimates the memory the restored process needs: the container's anon+shmem, or
+	// the first pre-dump (a full dump) when that's larger or the former is unknown.
+	restored := func() int64 {
+		if len(res.PreDumps) > 0 && res.PreDumps[0].Bytes > anon {
+			return res.PreDumps[0].Bytes
+		}
+		return max(anon, 0)
+	}
+	headroom := memHeadroom(dst.memTotal(ctx))
+	// The destination's memory and staging space are checked right before the freeze. If it
+	// answered now, a failed answer then is suspect: don't freeze on a missing check.
+	memKnown, stagingKnown := dst.memAvailable(ctx) >= 0, dst.stagingFree(ctx) >= 0
 
 	// Pre-copy rounds.
 	parent := ""
@@ -130,6 +149,25 @@ func (a *Agent) checkpoint(ctx context.Context, req api.CheckpointRequest, emit 
 	for round := 1; round <= req.PreDump.Max; round++ {
 		if err := ctx.Err(); err != nil {
 			return nil, fmt.Errorf("cancelled before pre-dump %d: %w", round, err)
+		}
+		// Another round must fit on the destination: staged images are RAM there. The
+		// destination dedups each round into the earlier ones, so a round costs memory only until
+		// that's done; the restored process is checked right before the freeze.
+		next := lastBytes
+		if next < 0 {
+			next = restored()
+		}
+		if avail, need := dst.memAvailable(ctx), next+headroom; avail >= 0 && avail < need {
+			emit(api.Event{Phase: "predump", Round: round, Message: fmt.Sprintf(
+				"stopping pre-copy: the destination has %s available; another round (~%s) plus headroom need ~%s",
+				humanBytes(avail), humanBytes(next), humanBytes(need))})
+			break
+		}
+		// Kubelet started the destination container when FINAL went out, and lcm-runc waits
+		// there for READY only so long: don't keep pre-copying past that.
+		if finalSent && time.Since(finalAt) > finalWait {
+			emit(api.Event{Phase: "predump", Round: round, Message: fmt.Sprintf("stopping pre-copy: %s since the destination was told the final dump is near", finalWait)})
+			break
 		}
 		if roundEstimate(round, anon, prevBytes, prevRate) <= finalLead {
 			if err := sendFinal(); err != nil {
@@ -151,6 +189,9 @@ func (a *Agent) checkpoint(ctx context.Context, req api.CheckpointRequest, emit 
 		if err := dst.putDir(ctx, filepath.Join(dir, name), name); err != nil {
 			return nil, fmt.Errorf("shipping %s: %w", name, err)
 		}
+		if e := dst.takeDedupError(); e != "" {
+			emit(api.Event{Phase: "predump", Round: round, Message: "warning: the destination couldn't dedup " + name + " (it stays staged whole): " + e})
+		}
 		// The destination has the pages now. Later dumps only consult this round's pagemaps (to
 		// skip pages that haven't changed), so free the page data: it's RAM on a tmpfs.
 		dropPages(filepath.Join(dir, name))
@@ -162,8 +203,8 @@ func (a *Agent) checkpoint(ctx context.Context, req api.CheckpointRequest, emit 
 		emit(api.Event{Phase: "predump", Round: round, Bytes: size, Millis: r.DumpMS + r.ShipMS,
 			Message: fmt.Sprintf("dump %dms ship %dms", r.DumpMS, r.ShipMS)})
 		parent, lastBytes = name, size
-		if size < req.PreDump.TargetBytes || (prevBytes >= 0 && size >= prevBytes) {
-			break // converged, or the dirty rate outpaces us: more rounds won't help
+		if size < req.PreDump.TargetBytes || (prevBytes >= 0 && size*10 >= prevBytes*9) {
+			break // converged, or shrinking by less than 10%: the dirty rate keeps up with us
 		}
 		prevBytes = size
 	}
@@ -179,9 +220,27 @@ func (a *Agent) checkpoint(ctx context.Context, req api.CheckpointRequest, emit 
 	// Last exit before the workload stops: a final dump the destination can't hold would leave it
 	// stopped with nowhere to restore. Every pre-dump round stays staged there until the restore,
 	// so rounds that don't converge (a slow link, a high dirty rate) can fill it.
+	if free := dst.stagingFree(ctx); free < 0 && stagingKnown {
+		return nil, errors.New("couldn't read the destination's staging space right before the freeze (it answered earlier); not stopping the workload")
+	}
 	if free, need := dst.stagingFree(ctx), finalReserve(lastBytes); free >= 0 && free < need {
 		return nil, fmt.Errorf("the destination's staging has %s free and the final dump needs ~%s; not stopping the workload (raise services.lcm.stagingSize, or give pre-copy a faster link)", humanBytes(free), humanBytes(need))
 	}
+	// The same for memory: the final dump plus the restored process must fit in what the
+	// destination has available now (a node that just rebooted is still filling up).
+	final := lastBytes
+	if final < 0 {
+		final = restored()
+	}
+	avail, need := dst.memAvailable(ctx), final+restored()+headroom
+	switch {
+	case avail < 0 && memKnown:
+		return nil, errors.New("couldn't read the destination's memory right before the freeze (it answered earlier); not stopping the workload")
+	case avail >= 0 && avail < need:
+		return nil, fmt.Errorf("the destination has %s of memory available and the final dump (~%s) plus the restored process (~%s) need ~%s with headroom; not stopping the workload", humanBytes(avail), humanBytes(final), humanBytes(restored()), humanBytes(need))
+	}
+	emit(api.Event{Phase: "freeze", Message: fmt.Sprintf("freezing the workload for the final dump after %d pre-copy round(s)%s",
+		len(res.PreDumps), lastRound(lastBytes))})
 	if err := sendFinal(); err != nil {
 		return nil, err
 	}
@@ -493,4 +552,24 @@ func fileSize(p string) int64 {
 		return 0
 	}
 	return fi.Size()
+}
+
+// memHeadroom is memory left free on the destination beyond the staged images and the restored
+// process: the rest of the node keeps running, and a reclaim storm resets a VM via its watchdog.
+// An eighth of the node's RAM, at most 3 GiB (3 GiB when the node doesn't report its size).
+func memHeadroom(total int64) int64 {
+	if total <= 0 {
+		return 3 << 30
+	}
+	return min(total/8, 3<<30)
+}
+
+// finalWait bounds pre-copy after FINAL: lcm-runc on the destination waits about 100 s for READY.
+const finalWait = 30 * time.Second
+
+func lastRound(b int64) string {
+	if b < 0 {
+		return ""
+	}
+	return " (last round " + humanBytes(b) + ")"
 }

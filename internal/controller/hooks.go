@@ -24,8 +24,9 @@ const (
 	// still running; the freeze comes seconds later). Env: LCM_SOURCE_NODE, LCM_TARGET_NODE.
 	PreMigrateAnnotation = "lcm.rooty.dev/pre-migrate"
 	// PostMigrateAnnotation runs in the restored container once it's back. Env: LCM_SOURCE_NODE,
-	// LCM_TARGET_NODE (where it runs now), LCM_BLACKOUT (e.g. "2.8s"), LCM_RESULT ("done", or
-	// "rolled_back" when the restore failed and it was restored on the source again).
+	// LCM_TARGET_NODE (where it runs now), LCM_BLACKOUT (e.g. "2.8s"), LCM_RESULT ("done";
+	// "rolled_back" when the restore failed and it was restored on the source again; "aborted"
+	// when the migration stopped before the freeze and it never stopped running).
 	PostMigrateAnnotation = "lcm.rooty.dev/post-migrate"
 
 	hookTimeout = 5 * time.Second

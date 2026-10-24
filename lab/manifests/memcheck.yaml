@@ -1,0 +1,26 @@
+# lcm-memcheck: verifies a migration preserved memory exactly (cmd/lcm-memcheck). Migrate it with
+#   lcm migrate memcheck --to node3 --token-file /etc/lcm/token
+# and watch `kubectl logs -f` on the new pod: "paused for ..." is the freeze, "MEMCHECK FAIL" (and
+# exit 2) a corrupted restore. -dirty sets how hard pre-copy has to work (pages/s, 4 KiB each).
+apiVersion: v1
+kind: Pod
+metadata:
+  name: memcheck
+  labels: {app: memcheck}
+spec:
+  runtimeClassName: lcm
+  nodeName: node2
+  initContainers:
+  - name: fetch
+    image: busybox:1.37
+    command: ["sh", "-c", "wget -q -O /lcm/lcm-memcheck http://$HOST_IP:7790/v1/bin/lcm-memcheck && chmod +x /lcm/lcm-memcheck"]
+    env: [{name: HOST_IP, valueFrom: {fieldRef: {fieldPath: status.hostIP}}}]
+    volumeMounts: [{name: bin, mountPath: /lcm}]
+  containers:
+  - name: memcheck
+    image: busybox:1.37
+    command: ["/lcm/lcm-memcheck", "-size", "1024", "-dirty", "15000"]
+    resources: {requests: {cpu: 100m, memory: 1200Mi}, limits: {memory: 1400Mi}}
+    volumeMounts: [{name: bin, mountPath: /lcm}]
+  volumes:
+  - {name: bin, emptyDir: {}}

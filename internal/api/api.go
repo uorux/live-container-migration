@@ -41,7 +41,7 @@ type PreDumpPolicy struct {
 // Event is one line of the NDJSON progress stream the checkpoint endpoint returns.
 type Event struct {
 	Time    time.Time `json:"time"`
-	Phase   string    `json:"phase"` // predump, quiesce, fence, dump, rootfs, ship, ready, error, done
+	Phase   string    `json:"phase"` // predump, warm, freeze, quiesce, fence, dump, rootfs, ship, ready, error, done
 	Message string    `json:"message,omitempty"`
 	Round   int       `json:"round,omitempty"`
 	Bytes   int64     `json:"bytes,omitempty"`

@@ -47,3 +47,24 @@ func TestExecRefusesWakeToken(t *testing.T) {
 		}
 	}
 }
+
+func TestStagingClientInfo(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer tok" {
+			http.Error(w, "unauthorized", 401)
+			return
+		}
+		w.Write([]byte(`{"addresses":["10.0.0.1"],"memAvailable":26658975744,"stagingFree":0,"version":"x"}`))
+	}))
+	defer srv.Close()
+	c := &stagingClient{base: srv.URL, token: "tok"}
+	if got := c.memAvailable(context.Background()); got != 26658975744 {
+		t.Errorf("memAvailable %d", got)
+	}
+	if got := c.stagingFree(context.Background()); got != 0 { // a full staging tmpfs, not "unknown"
+		t.Errorf("stagingFree %d", got)
+	}
+	if got := (&stagingClient{base: srv.URL, token: "bad"}).memAvailable(context.Background()); got != -1 {
+		t.Errorf("unauthorized: %d", got)
+	}
+}

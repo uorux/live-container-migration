@@ -41,11 +41,13 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -138,7 +140,7 @@ func (a *Agent) Handler() http.Handler {
 	mux.HandleFunc("DELETE /v1/fence/{uid}", a.auth(a.handleFence))
 	mux.HandleFunc("GET /v1/bin/{name}", func(w http.ResponseWriter, r *http.Request) {
 		switch name := r.PathValue("name"); name {
-		case "lcm-relay", "lcm-gateway", "lcm-loadtest":
+		case "lcm-relay", "lcm-gateway", "lcm-loadtest", "lcm-memcheck":
 			w.Header().Set("Content-Type", "application/octet-stream")
 			http.ServeFile(w, r, filepath.Join(a.binDir, name))
 		default:
@@ -296,7 +298,7 @@ func (a *Agent) handleInfo(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	info := map[string]any{"addresses": addrs, "version": Version, "encodings": []string{"zstd"},
-		"memAvailable": memAvailable(), "stagingFree": stagingFree()}
+		"memAvailable": memAvailable(), "memTotal": memTotal(), "stagingFree": stagingFree()}
 	if id := r.URL.Query().Get("container"); id != "" {
 		if !stage.ValidName(id) {
 			http.Error(w, "bad container id", http.StatusBadRequest)
@@ -354,6 +356,11 @@ func (a *Agent) handlePutDir(w http.ResponseWriter, r *http.Request) {
 	if err := untar(bufio.NewReaderSize(body, 1<<20), target); err != nil {
 		http.Error(w, err.Error(), 500)
 		return
+	}
+	if strings.HasPrefix(name, "pre-") {
+		if err := a.dedup(r.Context(), target); err != nil {
+			w.Header().Set(dedupErrorHeader, err.Error()) // the sender reports it; staging stays correct
+		}
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -465,6 +472,9 @@ func (a *Agent) handleForward(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 500)
 		return
 	}
+	// Pre-dump layers in round order: the receiver dedups each into its parents on arrival
+	// (re-punching the superseded pages this tar turns back into zeros), parents first.
+	sort.SliceStable(entries, func(i, j int) bool { return preRound(entries[i].Name()) < preRound(entries[j].Name()) })
 	for _, e := range entries {
 		name := e.Name()
 		switch {
@@ -699,3 +709,15 @@ func untar(r io.Reader, dir string) error {
 		}
 	}
 }
+
+// preRound orders staged entries for forwarding: pre-N by N, everything else after them.
+func preRound(name string) int {
+	if n, err := strconv.Atoi(strings.TrimPrefix(name, "pre-")); err == nil && strings.HasPrefix(name, "pre-") {
+		return n
+	}
+	return math.MaxInt
+}
+
+// dedupErrorHeader carries a failed staging dedup back to the shipping source (a pre-dump PUT still
+// succeeds: the layer is staged whole, which only costs memory).
+const dedupErrorHeader = "X-Lcm-Dedup-Error"

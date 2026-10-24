@@ -45,7 +45,7 @@ func (a *Agent) handleExec(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if !stage.ValidName(req.Container) || req.Command == "" {
+	if !stage.ValidName(req.Container) || strings.HasPrefix(req.Container, "-") || req.Command == "" {
 		http.Error(w, "bad container id or empty command", http.StatusBadRequest)
 		return
 	}

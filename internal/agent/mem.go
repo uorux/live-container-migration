@@ -19,7 +19,12 @@ import (
 // workloads mid-migration.
 
 // memAvailable is MemAvailable from /proc/meminfo, in bytes.
-func memAvailable() int64 {
+func memAvailable() int64 { return meminfo("MemAvailable:") }
+
+// memTotal is MemTotal from /proc/meminfo, in bytes.
+func memTotal() int64 { return meminfo("MemTotal:") }
+
+func meminfo(key string) int64 {
 	f, err := os.Open("/proc/meminfo")
 	if err != nil {
 		return -1
@@ -27,7 +32,7 @@ func memAvailable() int64 {
 	defer f.Close()
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
-		if v, ok := strings.CutPrefix(sc.Text(), "MemAvailable:"); ok {
+		if v, ok := strings.CutPrefix(sc.Text(), key); ok {
 			kb, err := strconv.ParseInt(strings.TrimSuffix(strings.TrimSpace(v), " kB"), 10, 64)
 			if err == nil {
 				return kb * 1024
@@ -71,11 +76,24 @@ func containerAnon(ctx context.Context, id string) (int64, error) {
 		return -1, err
 	}
 	defer f.Close()
+	// anon plus shmem: CRIU dumps shared memory too (a ZGC heap is a memfd, Postgres'
+	// shared_buffers are shared anonymous memory), and the destination restores all of it.
+	var total int64
+	found := false
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
-		if v, ok := strings.CutPrefix(sc.Text(), "anon "); ok {
-			return strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+		for _, key := range []string{"anon ", "shmem "} {
+			if v, ok := strings.CutPrefix(sc.Text(), key); ok {
+				n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+				if err != nil {
+					return -1, err
+				}
+				total, found = total+n, true
+			}
 		}
 	}
-	return -1, fmt.Errorf("no anon in memory.stat")
+	if !found {
+		return -1, fmt.Errorf("no anon in memory.stat")
+	}
+	return total, nil
 }

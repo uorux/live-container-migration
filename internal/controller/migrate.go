@@ -220,6 +220,9 @@ func Migrate(ctx context.Context, kc kubernetes.Interface, o Options) (*Result, 
 	if err != nil {
 		if ck == nil || !ck.SourceKilled {
 			cleanupDest()
+			runHook(ctx, srcURL, o.Token, src, PostMigrateAnnotation, ctrID,
+				map[string]string{"LCM_SOURCE_NODE": res.SourceNode, "LCM_TARGET_NODE": res.SourceNode,
+					"LCM_BLACKOUT": "0s", "LCM_RESULT": "aborted"}, logf)
 			return res, fmt.Errorf("checkpoint failed, source left running: %w", err)
 		}
 		return res, fmt.Errorf("checkpoint failed AFTER the source was stopped (the agent retried shipping): %w; "+
