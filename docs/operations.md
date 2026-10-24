@@ -30,7 +30,8 @@ kubectl uncordon carrack
 ## Upgrading lcm (version skew)
 
 Deploying a new lcm restarts `lcm-agent` only. In-flight migrations survive it (runc and CRIU
-keep running; the restarted agent finishes or aborts them), and running workloads are not touched.
+keep running; the restarted agent waits for them to exit, then finishes or aborts the migration
+depending on how the dump ended), and running workloads are not touched.
 Upgrade every node in one go and migrate afterwards; `LcmAgentVersionSkew` fires while versions
 differ.
 
@@ -128,12 +129,35 @@ the metric HELP text for the exact list.
 | What breaks | When | Outcome |
 | --- | --- | --- |
 | anything (CRIU error, network, destination agent) | before the final dump | migration aborts; the source never stopped; the relay resumes; players see nothing |
-| the source `lcm-agent` restarts | before the final dump | its runc/CRIU keep running (`KillMode=process`); the restarted agent aborts the migration and lifts the fence; the CLI learns this by polling |
-| the source `lcm-agent` restarts | during/after the final dump | runc finishes the dump; the restarted agent ships it and marks the destination ready; the parked destination pod restores (tested in the lab with players connected: no disconnects) |
+| the source `lcm-agent` restarts | before the final dump | its runc/CRIU keep running (`KillMode=process`); the restarted agent waits for any working on the migration (a pre-dump) to exit, then aborts the migration, lifts the fence and resumes the relay; the CLI learns this by polling |
+| the source `lcm-agent` restarts | during the final dump | runc/CRIU keep running; the restarted agent waits (up to 5 min) for those working on the migration's directory to exit, then goes by what they left: CRIU logged success with a complete image (or the container is gone and the image is complete) → as below; the dump failed and CRIU thawed the source → aborted as above (a container CRIU left frozen is thawed); the container died without a complete image → the fence is lifted and it cold-starts on the source node |
+| the source `lcm-agent` restarts | after the final dump | the restarted agent ships the dump and marks the destination ready; the parked destination pod restores (tested in the lab with players connected: no disconnects) |
+| the final dump's runc/CRIU still run 5 min after the agent restarted | during the final dump | nothing is touched (fence, images): the migration is reported as failed after the source stopped, naming the processes; see "A final dump that outlives an agent restart" |
 | the destination's staging can't hold the final dump (pre-copy didn't converge) | right before the final dump | aborted; the source keeps running (the source asks the destination's free staging first) |
 | shipping fails | after the final dump | retried for 90 s (e.g. a destination agent restart); then the CLI reports where the images are (final dump on the source, pre-dumps on the destination) for `lcm recover` |
 | the restore fails on the destination | after shipping | the destination pod is fenced, the images are forwarded back, the workload is restored on the source node (~10-15 s freeze) |
 | the CLI dies / its connection drops | any time | nothing stops; the agents reclaim RAM staging of migrations that completed; with a LivePod, the controller deletes the fenced source pod 2 min after its successor is Ready (otherwise delete it by hand); leftover destination pods carry the `lcm.rooty.dev/migration-id` annotation |
+
+### A final dump that outlives an agent restart
+
+A restarted agent finds runc/CRIU of an interrupted migration by their command line or the files
+they hold open under `/var/lib/lcm/ckpt/<migration>/`. Until they exit, nobody can tell whether
+the dump will end with the workload resumed (dump failed) or killed (its only copy is then in
+that directory), so after 5 min the agent gives up waiting but deletes nothing, leaves the fence
+in place, and keeps refusing new migrations of that container until it restarts. The CLI reports
+the failure as one after the source stopped (`LcmMigrationFailed`), keeping the destination's
+pre-dumps. To resolve it on the source node:
+
+1. `ps -o pid,stat,etime,cmd -p <pids>` (from the error or `journalctl -u lcm-agent`) and
+   `tail /var/lib/lcm/ckpt/<migration>/work/dump.log`. If the log still grows, wait.
+2. Once they have exited (kill them if the log has stopped growing for minutes; a container CRIU
+   leaves frozen is thawed in the next step), `systemctl restart lcm-agent`. The agent re-runs
+   the decision: it ships a complete dump to the destination (whose pod restores it, if still
+   there), or aborts if the container runs, or lifts the fence so it cold-starts.
+3. If the destination pod is gone by then, the shipped images are staged on the destination
+   (`/var/lib/lcm/restore/<ns_pod_ctr>/`, with `READY`): restore them with
+   `lcm recover <fenced source pod> --to <node> --images-on <destination> --key <ns_pod_ctr>`.
+   If shipping failed, the agent's error says where the images are, as for any failed ship.
 
 ## How a migration hides its latency
 
