@@ -291,6 +291,58 @@ Setup, in the lab cluster first (no prod nodes):
 4. **E3: de-Aikar the old-gen flags**, if the images use them. Second-order but cheap.
 5. **E5: tighter Xmx** for restore time, which is the next bottleneck once the delta shrinks.
 
+## 7. Measured: a real Fabric server under bot load (2026-10-24)
+
+Fabric 1.21.10 (loader 0.20.1), OpenJDK 21.0.12, G1, `-Xmx4G`, one shared pre-generated world,
+on a 32-core workstation. Load: `tools/mcbot` bots walking near spawn; "heavy" adds 20 bots, 400
+cows and villagers, and `randomTickSpeed 30`, for MSPT around 30 ms. After 60 s of warm-up,
+`tools/dirtyrate -interval 10s -duration 120s -bw 136M` (the tailnet throughput measured on
+prod) measured the dirty rate and predicted lcm's pre-copy. MSPT came from `tick query`, pauses
+from `-Xlog:gc`. Each batch ran in parallel, so compare within a batch.
+
+"Aikar" is the flag set the pack images use (`G1NewSizePercent=30`, `G1MaxNewSizePercent=40`,
+plus the rest). "capN" is the same set with `G1NewSizePercent=5` (3 for cap10) and
+`G1MaxNewSizePercent=N`.
+
+| batch | flags | dirty / 10 s | resident | predicted final dump | MSPT p50 / p99 | young pause p50 / max |
+|---|---|---|---|---|---|---|
+| light | Aikar, Xms2G | 782 MiB | 1.9 GiB | 311 MiB | 4.6 / 11.3 ms | 3.6 / 10 ms |
+| light | cap15, Xms2G | **390 MiB** | 1.4 GiB | **63 MiB** | 4.0 / 6.7 ms | n/a |
+| light | cap10, Xms4G | 498 MiB | 1.5 GiB | 99 MiB | 4.1 / 6.9 ms | n/a |
+| light | Aikar, Xms4G (=Xmx) | 821 MiB | 2.8 GiB | 496 MiB | 5.8 / 11.8 ms | 8.6 / 30 ms |
+| light | cap15, Xms4G | 691 MiB | 1.8 GiB | 213 MiB | 5.7 / 10.9 ms | 3.7 / 26 ms |
+| light | G1 default young sizing, Xms4G | 825 MiB | 3.6 GiB | 620 MiB | 6.1 / 17.4 ms | 7.9 / 23 ms |
+| heavy | Aikar, Xms2G | 999 MiB | 2.1 GiB | 628 MiB | 29.7 / 62.1 ms | 4.2 / 29 ms |
+| heavy | cap15, Xms2G | **485 MiB** | 1.7 GiB | **94 MiB** | 29.2 / 53.9 ms | 3.5 / 44 ms |
+| heavy | cap25, Xms2G | 700 MiB | 1.8 GiB | 221 MiB | 34.8 / 53.8 ms | 3.3 / 33 ms |
+
+Mixed collections were the same under heavy load (10 for cap15, 11 for Aikar), and there were
+no full GCs.
+
+What this shows:
+
+- **The dirty set per round is about the young generation.** G1 sizes the young gen as a percent
+  of the *current* heap, which is why cap15 with Xms2G (heap stayed at 2 GiB, so the young gen
+  is at most ~300 MiB) beats cap15 with Xms4G. Every young collection rewrites the survivors
+  and the eden the next allocations reuse, so whatever the young gen holds is dirty again each
+  round.
+- **Capping it costs nothing measurable here.** Young collections run 2-3x as often but stay a
+  few ms (p50 3.5 ms). MSPT didn't get worse, and its p99 got better. The old gen saw no extra
+  mixed GCs.
+- **The final dump (the blackout's biggest part) shrinks 5-7x:** 628 MiB to 94 MiB under heavy
+  load. At 136 MB/s that's ~4.6 s of shipping down to ~0.7 s, and the pre-copy converges in 4
+  rounds instead of stalling at ~700 MiB a round.
+- `Xms=Xmx` doesn't help: it grows the resident set (more to pre-copy) and, with percent-based
+  young sizing, the young gen with it.
+
+**Recommendation:** in the pack images' JVM flags, replace Aikar's `-XX:G1NewSizePercent=30
+-XX:G1MaxNewSizePercent=40` with `-XX:G1NewSizePercent=5 -XX:G1MaxNewSizePercent=15`. Keep the
+rest, and keep `Xms` below `Xmx`. Caveats: one vanilla-ish Fabric server, not a 200-mod pack. Big
+modpacks allocate faster, so the young gen fills sooner and objects get promoted earlier
+(`MaxTenuringThreshold=1`). Try it on one pack first, and compare MSPT and GC logs over a
+play session. `tools/dirtyrate` on the live server (with migrations paused) gives that pack's
+before and after.
+
 ## Sources
 - Kernel: [soft-dirty PTEs](https://docs.kernel.org/admin-guide/mm/soft-dirty.html),
   [pagemap](https://docs.kernel.org/admin-guide/mm/pagemap.html), [THP](https://docs.kernel.org/admin-guide/mm/transhuge.html);
