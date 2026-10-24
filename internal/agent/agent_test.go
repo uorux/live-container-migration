@@ -162,6 +162,7 @@ func TestMutatingEndpointsRequireAuth(t *testing.T) {
 		{"DELETE", "/v1/ckpt/mig"},
 		{"POST", "/v1/fence/uid-1"},
 		{"DELETE", "/v1/fence/uid-1"},
+		{"POST", "/v1/exec"},
 	}
 	for _, e := range endpoints {
 		for _, tok := range []string{"", "wrong", testToken + "x", strings.ToUpper(testToken)} {

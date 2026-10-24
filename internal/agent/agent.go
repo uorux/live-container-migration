@@ -118,6 +118,7 @@ func (a *Agent) Handler() http.Handler {
 	mux.Handle("GET /metrics", a.tm.reg.Handler())
 	mux.HandleFunc("POST /v1/report", a.auth(a.handleReport))
 	mux.HandleFunc("POST /v1/pull", a.auth(a.handlePull))
+	mux.HandleFunc("POST /v1/exec", a.auth(a.handleExec))
 	mux.HandleFunc("GET /v1/info", a.auth(a.handleInfo))
 	mux.HandleFunc("GET /v1/relay", a.auth(a.handleRelay))
 	mux.HandleFunc("POST /v1/wake/{backend}", a.handleWake)

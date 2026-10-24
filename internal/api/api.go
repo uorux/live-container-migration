@@ -110,3 +110,12 @@ type MigrationReport struct {
 	PreDumps   []Round `json:"preDumps,omitempty"`
 	TotalMS    int64   `json:"totalMs"`
 }
+
+// ExecRequest asks an agent to run a shell command (sh -c) inside one of its node's containers:
+// the migration hooks (controller.PreMigrateAnnotation, PostMigrateAnnotation).
+type ExecRequest struct {
+	Container  string            `json:"container"` // containerd ID
+	Command    string            `json:"command"`
+	Env        map[string]string `json:"env,omitempty"` // exported before Command; names [A-Z_][A-Z0-9_]*
+	TimeoutSec int               `json:"timeoutSec,omitempty"`
+}

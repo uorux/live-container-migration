@@ -80,6 +80,13 @@ def whitelist_configmaps(players):
              "data": data} for ns in ("minecraft", "minecraft-gw")]
 
 
+# Migration hooks (lcm runs them in the server container; env per controller/hooks.go).
+PRE_MIGRATE = ('echo "say This server is moving to another machine now. You\'ll stay connected;'
+               ' expect a pause of a few seconds." > /tmp/mc-console')
+POST_MIGRATE = ('if [ "$LCM_RESULT" = done ]; then m="Move finished (paused for $LCM_BLACKOUT). Carry on!";'
+                ' else m="The move didn\'t go through; the server stayed where it was."; fi;'
+                ' echo "say $m" > /tmp/mc-console')
+
 # Every gateway the relays keep a session with: the in-cluster VIP gateways (one Service; standbys
 # forward) and each VPS ingress box's tailnet address, port 7000 (deploy/standalone). A listed but
 # unreachable gateway only logs reconnects (the tailnet ACL must allow nodes -> boxes tcp:7000).
@@ -110,7 +117,14 @@ def livepod(name, req, lim, wl, ops, modded, image):
             # again after 10 minutes empty, like AutoServer's autoShutdownDelay on recusant.
             "onDemand": {"backend": name, "idleAfter": "10m", "startAsleep": True},
             "template": {
-                "metadata": {"labels": {"app.kubernetes.io/part-of": "minecraft", "mc.rooty.dev/pack": name}},
+                "metadata": {
+                    "labels": {"app.kubernetes.io/part-of": "minecraft", "mc.rooty.dev/pack": name},
+                    # Chat announcements around a live migration, through mc-start's console pipe.
+                    "annotations": {
+                        "lcm.rooty.dev/pre-migrate": PRE_MIGRATE,
+                        "lcm.rooty.dev/post-migrate": POST_MIGRATE,
+                    },
+                },
                 "spec": {
                     "runtimeClassName": "lcm",
                     "priorityClassName": "minecraft",

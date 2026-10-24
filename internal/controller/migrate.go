@@ -200,6 +200,9 @@ func Migrate(ctx context.Context, kc kubernetes.Interface, o Options) (*Result, 
 		}
 	}
 
+	runHook(ctx, srcURL, o.Token, src, PreMigrateAnnotation, ctrID,
+		map[string]string{"LCM_SOURCE_NODE": res.SourceNode, "LCM_TARGET_NODE": o.TargetNode}, logf)
+
 	// 2. Checkpoint on the source, streamed progress.
 	req := api.CheckpointRequest{MigrationID: res.MigrationID, Namespace: o.Namespace, Pod: src.Name,
 		PodUID: string(src.UID), Container: ctrName, ContainerID: ctrID, DestKey: key, DestURL: shipURL, DestPodUID: destUID, PreDump: o.PreDump, Relay: o.Relay, LazyRestore: o.LazyRestore}
@@ -259,6 +262,13 @@ restored:
 		}
 	}
 	logf("restored on %s: restore %dms, relay resume %q, blackout %s", res.DestNode, rr.RestoreMS, rr.RelayResume, res.Blackout.Round(time.Millisecond))
+	result := "done"
+	if rolledBack {
+		result = "rolled_back"
+	}
+	runHook(ctx, dstURL, o.Token, src, PostMigrateAnnotation, containerID(ctx, kc, o.Namespace, res.DestPod, ctrName),
+		map[string]string{"LCM_SOURCE_NODE": res.SourceNode, "LCM_TARGET_NODE": res.DestNode,
+			"LCM_BLACKOUT": res.Blackout.Round(100 * time.Millisecond).String(), "LCM_RESULT": result}, logf)
 
 	// 4. Retire the source. Its fence stays (keyed by its UID, garbage-collected by the agent);
 	// a graceful delete lets kubelet confirm the sandbox is gone.

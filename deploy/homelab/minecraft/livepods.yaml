@@ -19,6 +19,10 @@
         "labels": {
           "app.kubernetes.io/part-of": "minecraft",
           "mc.rooty.dev/pack": "atm9"
+        },
+        "annotations": {
+          "lcm.rooty.dev/pre-migrate": "echo \"say This server is moving to another machine now. You'll stay connected; expect a pause of a few seconds.\" > /tmp/mc-console",
+          "lcm.rooty.dev/post-migrate": "if [ \"$LCM_RESULT\" = done ]; then m=\"Move finished (paused for $LCM_BLACKOUT). Carry on!\"; else m=\"The move didn't go through; the server stayed where it was.\"; fi; echo \"say $m\" > /tmp/mc-console"
         }
       },
       "spec": {
@@ -179,6 +183,10 @@
         "labels": {
           "app.kubernetes.io/part-of": "minecraft",
           "mc.rooty.dev/pack": "atm10"
+        },
+        "annotations": {
+          "lcm.rooty.dev/pre-migrate": "echo \"say This server is moving to another machine now. You'll stay connected; expect a pause of a few seconds.\" > /tmp/mc-console",
+          "lcm.rooty.dev/post-migrate": "if [ \"$LCM_RESULT\" = done ]; then m=\"Move finished (paused for $LCM_BLACKOUT). Carry on!\"; else m=\"The move didn't go through; the server stayed where it was.\"; fi; echo \"say $m\" > /tmp/mc-console"
         }
       },
       "spec": {
@@ -339,6 +347,10 @@
         "labels": {
           "app.kubernetes.io/part-of": "minecraft",
           "mc.rooty.dev/pack": "bettermc"
+        },
+        "annotations": {
+          "lcm.rooty.dev/pre-migrate": "echo \"say This server is moving to another machine now. You'll stay connected; expect a pause of a few seconds.\" > /tmp/mc-console",
+          "lcm.rooty.dev/post-migrate": "if [ \"$LCM_RESULT\" = done ]; then m=\"Move finished (paused for $LCM_BLACKOUT). Carry on!\"; else m=\"The move didn't go through; the server stayed where it was.\"; fi; echo \"say $m\" > /tmp/mc-console"
         }
       },
       "spec": {
@@ -499,6 +511,10 @@
         "labels": {
           "app.kubernetes.io/part-of": "minecraft",
           "mc.rooty.dev/pack": "evolution"
+        },
+        "annotations": {
+          "lcm.rooty.dev/pre-migrate": "echo \"say This server is moving to another machine now. You'll stay connected; expect a pause of a few seconds.\" > /tmp/mc-console",
+          "lcm.rooty.dev/post-migrate": "if [ \"$LCM_RESULT\" = done ]; then m=\"Move finished (paused for $LCM_BLACKOUT). Carry on!\"; else m=\"The move didn't go through; the server stayed where it was.\"; fi; echo \"say $m\" > /tmp/mc-console"
         }
       },
       "spec": {
@@ -659,6 +675,10 @@
         "labels": {
           "app.kubernetes.io/part-of": "minecraft",
           "mc.rooty.dev/pack": "ob2"
+        },
+        "annotations": {
+          "lcm.rooty.dev/pre-migrate": "echo \"say This server is moving to another machine now. You'll stay connected; expect a pause of a few seconds.\" > /tmp/mc-console",
+          "lcm.rooty.dev/post-migrate": "if [ \"$LCM_RESULT\" = done ]; then m=\"Move finished (paused for $LCM_BLACKOUT). Carry on!\"; else m=\"The move didn't go through; the server stayed where it was.\"; fi; echo \"say $m\" > /tmp/mc-console"
         }
       },
       "spec": {
@@ -819,6 +839,10 @@
         "labels": {
           "app.kubernetes.io/part-of": "minecraft",
           "mc.rooty.dev/pack": "sb4"
+        },
+        "annotations": {
+          "lcm.rooty.dev/pre-migrate": "echo \"say This server is moving to another machine now. You'll stay connected; expect a pause of a few seconds.\" > /tmp/mc-console",
+          "lcm.rooty.dev/post-migrate": "if [ \"$LCM_RESULT\" = done ]; then m=\"Move finished (paused for $LCM_BLACKOUT). Carry on!\"; else m=\"The move didn't go through; the server stayed where it was.\"; fi; echo \"say $m\" > /tmp/mc-console"
         }
       },
       "spec": {
@@ -979,6 +1003,10 @@
         "labels": {
           "app.kubernetes.io/part-of": "minecraft",
           "mc.rooty.dev/pack": "skies2"
+        },
+        "annotations": {
+          "lcm.rooty.dev/pre-migrate": "echo \"say This server is moving to another machine now. You'll stay connected; expect a pause of a few seconds.\" > /tmp/mc-console",
+          "lcm.rooty.dev/post-migrate": "if [ \"$LCM_RESULT\" = done ]; then m=\"Move finished (paused for $LCM_BLACKOUT). Carry on!\"; else m=\"The move didn't go through; the server stayed where it was.\"; fi; echo \"say $m\" > /tmp/mc-console"
         }
       },
       "spec": {
@@ -1139,6 +1167,10 @@
         "labels": {
           "app.kubernetes.io/part-of": "minecraft",
           "mc.rooty.dev/pack": "p2haustian"
+        },
+        "annotations": {
+          "lcm.rooty.dev/pre-migrate": "echo \"say This server is moving to another machine now. You'll stay connected; expect a pause of a few seconds.\" > /tmp/mc-console",
+          "lcm.rooty.dev/post-migrate": "if [ \"$LCM_RESULT\" = done ]; then m=\"Move finished (paused for $LCM_BLACKOUT). Carry on!\"; else m=\"The move didn't go through; the server stayed where it was.\"; fi; echo \"say $m\" > /tmp/mc-console"
         }
       },
       "spec": {
@@ -1299,6 +1331,10 @@
         "labels": {
           "app.kubernetes.io/part-of": "minecraft",
           "mc.rooty.dev/pack": "dungeonheroes"
+        },
+        "annotations": {
+          "lcm.rooty.dev/pre-migrate": "echo \"say This server is moving to another machine now. You'll stay connected; expect a pause of a few seconds.\" > /tmp/mc-console",
+          "lcm.rooty.dev/post-migrate": "if [ \"$LCM_RESULT\" = done ]; then m=\"Move finished (paused for $LCM_BLACKOUT). Carry on!\"; else m=\"The move didn't go through; the server stayed where it was.\"; fi; echo \"say $m\" > /tmp/mc-console"
         }
       },
       "spec": {
@@ -1459,6 +1495,10 @@
         "labels": {
           "app.kubernetes.io/part-of": "minecraft",
           "mc.rooty.dev/pack": "integratedmc"
+        },
+        "annotations": {
+          "lcm.rooty.dev/pre-migrate": "echo \"say This server is moving to another machine now. You'll stay connected; expect a pause of a few seconds.\" > /tmp/mc-console",
+          "lcm.rooty.dev/post-migrate": "if [ \"$LCM_RESULT\" = done ]; then m=\"Move finished (paused for $LCM_BLACKOUT). Carry on!\"; else m=\"The move didn't go through; the server stayed where it was.\"; fi; echo \"say $m\" > /tmp/mc-console"
         }
       },
       "spec": {
@@ -1619,6 +1659,10 @@
         "labels": {
           "app.kubernetes.io/part-of": "minecraft",
           "mc.rooty.dev/pack": "abyssalascent"
+        },
+        "annotations": {
+          "lcm.rooty.dev/pre-migrate": "echo \"say This server is moving to another machine now. You'll stay connected; expect a pause of a few seconds.\" > /tmp/mc-console",
+          "lcm.rooty.dev/post-migrate": "if [ \"$LCM_RESULT\" = done ]; then m=\"Move finished (paused for $LCM_BLACKOUT). Carry on!\"; else m=\"The move didn't go through; the server stayed where it was.\"; fi; echo \"say $m\" > /tmp/mc-console"
         }
       },
       "spec": {
@@ -1779,6 +1823,10 @@
         "labels": {
           "app.kubernetes.io/part-of": "minecraft",
           "mc.rooty.dev/pack": "sdfs"
+        },
+        "annotations": {
+          "lcm.rooty.dev/pre-migrate": "echo \"say This server is moving to another machine now. You'll stay connected; expect a pause of a few seconds.\" > /tmp/mc-console",
+          "lcm.rooty.dev/post-migrate": "if [ \"$LCM_RESULT\" = done ]; then m=\"Move finished (paused for $LCM_BLACKOUT). Carry on!\"; else m=\"The move didn't go through; the server stayed where it was.\"; fi; echo \"say $m\" > /tmp/mc-console"
         }
       },
       "spec": {
