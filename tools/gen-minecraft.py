@@ -114,6 +114,11 @@ def livepod(name, req, lim, wl, ops, modded, image):
                 "spec": {
                     "runtimeClassName": "lcm",
                     "priorityClassName": "minecraft",
+                    # The images are private (bundled mod licenses). Jacob creates this Secret
+                    # outside git: dockerconfigjson for git.rooty.dev, a read-only package token.
+                    # lcm forwards it to the destination node's pre-pull, so migrations pull
+                    # before the freeze, not inside it.
+                    "imagePullSecrets": [{"name": "minecraft-registry-pull"}],
                     # mc-start: `stop`, save (~2 s), SIGTERM to a lingering JVM after 25 s
                     # (MC_STOP_GRACE); exit 143 then is normal.
                     "terminationGracePeriodSeconds": 180,

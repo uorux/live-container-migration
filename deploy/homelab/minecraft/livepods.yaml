@@ -24,6 +24,11 @@
       "spec": {
         "runtimeClassName": "lcm",
         "priorityClassName": "minecraft",
+        "imagePullSecrets": [
+          {
+            "name": "minecraft-registry-pull"
+          }
+        ],
         "terminationGracePeriodSeconds": 180,
         "securityContext": {
           "runAsUser": 1000,
@@ -179,6 +184,11 @@
       "spec": {
         "runtimeClassName": "lcm",
         "priorityClassName": "minecraft",
+        "imagePullSecrets": [
+          {
+            "name": "minecraft-registry-pull"
+          }
+        ],
         "terminationGracePeriodSeconds": 180,
         "securityContext": {
           "runAsUser": 1000,
@@ -334,6 +344,11 @@
       "spec": {
         "runtimeClassName": "lcm",
         "priorityClassName": "minecraft",
+        "imagePullSecrets": [
+          {
+            "name": "minecraft-registry-pull"
+          }
+        ],
         "terminationGracePeriodSeconds": 180,
         "securityContext": {
           "runAsUser": 1000,
@@ -489,6 +504,11 @@
       "spec": {
         "runtimeClassName": "lcm",
         "priorityClassName": "minecraft",
+        "imagePullSecrets": [
+          {
+            "name": "minecraft-registry-pull"
+          }
+        ],
         "terminationGracePeriodSeconds": 180,
         "securityContext": {
           "runAsUser": 1000,
@@ -644,6 +664,11 @@
       "spec": {
         "runtimeClassName": "lcm",
         "priorityClassName": "minecraft",
+        "imagePullSecrets": [
+          {
+            "name": "minecraft-registry-pull"
+          }
+        ],
         "terminationGracePeriodSeconds": 180,
         "securityContext": {
           "runAsUser": 1000,
@@ -799,6 +824,11 @@
       "spec": {
         "runtimeClassName": "lcm",
         "priorityClassName": "minecraft",
+        "imagePullSecrets": [
+          {
+            "name": "minecraft-registry-pull"
+          }
+        ],
         "terminationGracePeriodSeconds": 180,
         "securityContext": {
           "runAsUser": 1000,
@@ -954,6 +984,11 @@
       "spec": {
         "runtimeClassName": "lcm",
         "priorityClassName": "minecraft",
+        "imagePullSecrets": [
+          {
+            "name": "minecraft-registry-pull"
+          }
+        ],
         "terminationGracePeriodSeconds": 180,
         "securityContext": {
           "runAsUser": 1000,
@@ -1109,6 +1144,11 @@
       "spec": {
         "runtimeClassName": "lcm",
         "priorityClassName": "minecraft",
+        "imagePullSecrets": [
+          {
+            "name": "minecraft-registry-pull"
+          }
+        ],
         "terminationGracePeriodSeconds": 180,
         "securityContext": {
           "runAsUser": 1000,
@@ -1264,6 +1304,11 @@
       "spec": {
         "runtimeClassName": "lcm",
         "priorityClassName": "minecraft",
+        "imagePullSecrets": [
+          {
+            "name": "minecraft-registry-pull"
+          }
+        ],
         "terminationGracePeriodSeconds": 180,
         "securityContext": {
           "runAsUser": 1000,
@@ -1419,6 +1464,11 @@
       "spec": {
         "runtimeClassName": "lcm",
         "priorityClassName": "minecraft",
+        "imagePullSecrets": [
+          {
+            "name": "minecraft-registry-pull"
+          }
+        ],
         "terminationGracePeriodSeconds": 180,
         "securityContext": {
           "runAsUser": 1000,
@@ -1574,6 +1624,11 @@
       "spec": {
         "runtimeClassName": "lcm",
         "priorityClassName": "minecraft",
+        "imagePullSecrets": [
+          {
+            "name": "minecraft-registry-pull"
+          }
+        ],
         "terminationGracePeriodSeconds": 180,
         "securityContext": {
           "runAsUser": 1000,
@@ -1729,6 +1784,11 @@
       "spec": {
         "runtimeClassName": "lcm",
         "priorityClassName": "minecraft",
+        "imagePullSecrets": [
+          {
+            "name": "minecraft-registry-pull"
+          }
+        ],
         "terminationGracePeriodSeconds": 180,
         "securityContext": {
           "runAsUser": 1000,

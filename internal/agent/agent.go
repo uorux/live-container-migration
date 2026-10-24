@@ -251,6 +251,8 @@ func (a *Agent) handleCheckpointStatus(w http.ResponseWriter, r *http.Request) {
 func (a *Agent) handlePull(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Images []string `json:"images"`
+		// Auth maps an image to base64("user:password") from the pod's imagePullSecrets.
+		Auth map[string]string `json:"auth"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -263,7 +265,12 @@ func (a *Agent) handlePull(w http.ResponseWriter, r *http.Request) {
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
 		t0 := time.Now()
-		out, err := exec.CommandContext(ctx, "k3s", "crictl", "pull", img).CombinedOutput()
+		cmd := exec.CommandContext(ctx, "k3s", "crictl", "pull", img)
+		if a := req.Auth[img]; a != "" {
+			// In the environment rather than argv, which every local user can read.
+			cmd.Env = append(os.Environ(), "CRICTL_AUTH="+a)
+		}
+		out, err := cmd.CombinedOutput()
 		cancel()
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("%s: %v: %s", img, err, strings.TrimSpace(string(out))))

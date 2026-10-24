@@ -178,7 +178,13 @@ func Migrate(ctx context.Context, kc kubernetes.Interface, o Options) (*Result, 
 		images = append(images, c.Image)
 	}
 	t1 := time.Now()
-	body, _ := json.Marshal(map[string]any{"images": images})
+	// Private images: send the pod's pull credentials along (kubelet would use them, but only
+	// once the blackout has started).
+	auths, warns := pullAuths(ctx, kc, src, images)
+	for _, w := range warns {
+		logf("warning: %s (pre-pulling without it)", w)
+	}
+	body, _ := json.Marshal(map[string]any{"images": images, "auth": auths})
 	if _, err := agentDo(ctx, dstURL, o.Token, http.MethodPost, "/v1/pull", bytes.NewReader(body)); err != nil {
 		logf("warning: pre-pulling images on %s: %v (kubelet will pull them during the blackout)", o.TargetNode, err)
 	} else {
