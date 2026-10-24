@@ -78,6 +78,31 @@ in
       example = [ "tailscale0" ];
       description = "Interfaces on which to open the agent port.";
     };
+    transportTLS = {
+      enable = mkOption {
+        type = types.bool;
+        default = false;
+        description = ''
+          Also serve the agent API over TLS on transportTLS.port, keyed from the agent token (every
+          node derives the same key; both ends must hold it; no certificates to manage).
+          `lcm migrate --transfer-network CIDR` ships checkpoint images there when the destination
+          offers it, and otherwise over the InternalIPs (plaintext only with --transfer-plaintext).
+        '';
+      };
+      port = mkOption { type = types.port; default = 7791; };
+      firewallInterfaces = mkOption {
+        type = types.listOf types.str;
+        default = [ ];
+        example = [ "enp1s0" ];
+        description = "Interfaces on which to open the TLS port: the transfer network (e.g. the LAN).";
+      };
+      allowedCIDRs = mkOption {
+        type = types.listOf types.str;
+        default = [ ];
+        example = [ "10.0.0.0/24" ];
+        description = "Source networks allowed to reach the TLS port regardless of interface.";
+      };
+    };
     stagingSize = mkOption {
       type = types.str;
       default = "50%";
@@ -141,6 +166,10 @@ in
   config = mkIf cfg.enable (let
     deriveWake = cfg.livePods.enable && cfg.deriveTokenFromK3s && cfg.wakeTokenFile == null;
     wakeFile = if deriveWake then "/run/lcm/wake-token" else cfg.wakeTokenFile;
+    tls = cfg.transportTLS;
+    # Source networks let in per port.
+    cidrRules = lib.optional (cfg.allowedCIDRs != [ ]) { cidrs = cfg.allowedCIDRs; port = cfg.port; }
+      ++ lib.optional (tls.enable && tls.allowedCIDRs != [ ]) { cidrs = tls.allowedCIDRs; port = tls.port; };
   in {
     # CRIU dumps sockets via sock_diag; TCP repair needs tcp_diag.
     boot.kernelModules = [ "inet_diag" "tcp_diag" "udp_diag" "unix_diag" "netlink_diag" "packet_diag" ];
@@ -235,7 +264,8 @@ in
         LCM_WAKE_TOKEN_SECRETS = lib.concatStringsSep "," cfg.livePods.wakeTokenSecrets;
       };
       serviceConfig = {
-        ExecStart = "${cfg.package}/bin/lcm-agent serve -listen ${cfg.listenAddress}:${toString cfg.port} -token-file ${cfg.tokenFile}";
+        ExecStart = "${cfg.package}/bin/lcm-agent serve -listen ${cfg.listenAddress}:${toString cfg.port} -token-file ${cfg.tokenFile}"
+          + lib.optionalString tls.enable " -tls-listen ${cfg.listenAddress}:${toString tls.port}";
         Restart = "always";
         RestartSec = 2;
         # On restart (including NixOS activation), stop only the agent itself: a runc/CRIU it
@@ -247,11 +277,12 @@ in
     };
 
     environment.systemPackages = [ cfg.package cfg.criuPackage ];
-    networking.firewall.interfaces = lib.genAttrs cfg.firewallInterfaces (_: { allowedTCPPorts = [ cfg.port ]; });
-    networking.firewall.extraInputRules = lib.mkIf (config.networking.nftables.enable && cfg.allowedCIDRs != [ ])
-      "ip saddr { ${lib.concatStringsSep ", " cfg.allowedCIDRs} } tcp dport ${toString cfg.port} accept";
+    networking.firewall.interfaces = lib.mkMerge ([ (lib.genAttrs cfg.firewallInterfaces (_: { allowedTCPPorts = [ cfg.port ]; })) ]
+      ++ lib.optional tls.enable (lib.genAttrs tls.firewallInterfaces (_: { allowedTCPPorts = [ tls.port ]; })));
+    networking.firewall.extraInputRules = lib.mkIf (config.networking.nftables.enable && cidrRules != [ ]) (lib.concatMapStrings
+      (r: "ip saddr { ${lib.concatStringsSep ", " r.cidrs} } tcp dport ${toString r.port} accept\n") cidrRules);
     networking.firewall.extraCommands = lib.mkIf (!config.networking.nftables.enable) (lib.concatMapStrings
-      (c: "iptables -w -A nixos-fw -p tcp -s ${c} --dport ${toString cfg.port} -j nixos-fw-accept\n")
-      cfg.allowedCIDRs);
+      (r: lib.concatMapStrings (c: "iptables -w -A nixos-fw -p tcp -s ${c} --dport ${toString r.port} -j nixos-fw-accept\n") r.cidrs)
+      cidrRules);
   });
 }

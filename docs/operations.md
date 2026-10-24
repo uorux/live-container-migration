@@ -7,7 +7,7 @@ Design background: [design.md](design.md). Rollout: [production.md](production.m
 
 | Piece | Runs as | Talks to | Logs |
 | --- | --- | --- | --- |
-| `lcm-agent` | systemd service on every k3s node (`services.lcm`) | other agents on node IPs :7790, runc/CRIU locally | journald `-u lcm-agent`; shipped to VictoriaLogs as `unit:lcm-agent` when `logShipping` is set |
+| `lcm-agent` | systemd service on every k3s node (`services.lcm`) | other agents on node IPs :7790 (and :7791, TLS, on a transfer network), runc/CRIU locally | journald `-u lcm-agent`; shipped to VictoriaLogs as `unit:lcm-agent` when `logShipping` is set |
 | `lcm-runc` | executed by containerd's shim for every `runtimeClassName: lcm` container | real runc, CRIU | `/var/lib/lcm/lcm-runc.log` (lifecycle calls, restores, refusals); shipped as `unit:lcm-runc` |
 | CRIU | child of runc | the kernel | per migration under `/var/lib/lcm/logs/<migration-id>/` (dumps, source node) and `/var/lib/lcm/logs/<ns_pod_ctr>/restore.log` (destination) |
 | `lcm-gateway` | Deployment in the workload's namespace | players; relays | pod logs (already collected into VictoriaLogs) |
@@ -152,10 +152,41 @@ the metric HELP text for the exact list.
 - Transfers are zstd-compressed (JVM heap pages compress 6-8x); on links slower than ~1 GB/s
   this is the single biggest factor for pre-copy convergence and the final ship.
 - `--predump-max` / `--predump-target`: more rounds help only while each round shrinks.
-- `--transfer-network CIDR`: ship over agent addresses in this network instead of the node
-  InternalIPs (e.g. a LAN faster than the tailnet). The LAN must be allowed to reach port 7790.
+- `--transfer-network CIDR` (env `LCM_TRANSFER_NETWORK`): ship over agent addresses in this
+  network instead of the node InternalIPs (e.g. a LAN faster than the tailnet), encrypted; see
+  "Encrypted transfers over a LAN" below.
 - `--lazy-restore` (experimental): CRIU lazy pages; the process resumes before its memory is
   loaded. Works in the lab, but wasn't faster there than eager restores.
+
+## Encrypted transfers over a LAN
+
+The InternalIPs are on the tailnet, which WireGuard encrypts but which costs CPU and caps
+throughput. To ship checkpoint images over a plain LAN instead, without exposing them on it:
+
+```nix
+services.lcm.transportTLS = {
+  enable = true;                         # lcm-agent -tls-listen :7791
+  firewallInterfaces = [ "enp1s0" ];     # or allowedCIDRs = [ "10.0.0.0/24" ];
+};
+```
+
+and migrate with `--transfer-network 10.0.0.0/24`. Agents then also serve their API over TLS 1.3
+on port 7791 with a key every node derives from the agent token: each end accepts only a peer
+presenting that exact key, so there is no CA and nothing to distribute or renew, and someone on
+the LAN without the token can't read, alter or impersonate either end. Requests still carry the
+bearer token. Keep port 7790 closed on the LAN (its traffic, bearer token included, is plaintext).
+
+The CLI reads both agents' TLS ports from `/v1/info` over the InternalIPs, so a LAN attacker
+can't strip them. If either agent has none (an older agent, or transportTLS off), the data goes
+over the InternalIPs, with a warning; `--transfer-plaintext` allows plain HTTP on the transfer
+network instead. A rollback forwards the images back the same way (over the InternalIPs if that
+fails).
+
+Cost: the encryption runs on the already-compressed stream; end to end it changed neither
+throughput nor CPU measurably in a loopback benchmark (`go test ./internal/agent -run '^$'
+-bench 'Ship|Transport|Zstd'`): AES-GCM costs ~0.2 CPU-s per GB on each end, zstd compression ~2.
+If the TLS port is unreachable (firewall), migrations abort before the source stops
+("destination agent: ... 7791 ...").
 
 ## Debugging a migration
 

@@ -89,7 +89,7 @@ lcm history
 ```
 
 Useful flags: `--predump-max`, `--predump-target`, `--transfer-network CIDR` (ship over a faster
-network), `--skip-memory-check`, `--lazy-restore` (experimental), `--json`.
+network, TLS-encrypted: `services.lcm.transportTLS`), `--skip-memory-check`, `--lazy-restore` (experimental), `--json`.
 
 ## Observability
 

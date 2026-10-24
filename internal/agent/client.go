@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bufio"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -24,9 +25,11 @@ import (
 // zstd-compressed: page images compress 6-8x (measured on a Minecraft JVM) and node-to-node links
 // (WireGuard) are far slower than the compressor, so this is the biggest lever on both pre-copy
 // convergence and the final ship inside the blackout. Receivers too old to decode zstd get plain
-// bodies (see encoding), so nodes can be upgraded one at a time.
+// bodies (see encoding), so nodes can be upgraded one at a time. An https:// base goes over the
+// encrypted agent transport (transport.go).
 type stagingClient struct {
 	base, key, token string
+	hc               *http.Client // nil: shipClient (plain HTTP only)
 
 	mu    sync.Mutex
 	known bool
@@ -48,7 +51,7 @@ func (c *stagingClient) encoding(ctx context.Context) string {
 		return "zstd"
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
-	resp, err := shipClient.Do(req)
+	resp, err := c.client().Do(req)
 	if err != nil {
 		return "zstd"
 	}
@@ -75,12 +78,32 @@ func (c *stagingClient) encoding(ctx context.Context) string {
 // still running during pre-copy.
 const compressConcurrency = 4
 
-var shipClient = &http.Client{Transport: &http.Transport{
-	DialContext:         (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 15 * time.Second}).DialContext,
-	MaxIdleConnsPerHost: 4,
-	WriteBufferSize:     1 << 20,
-	ReadBufferSize:      64 << 10,
-}}
+var shipClient = newShipClient(nil)
+
+// newShipClient returns a client for agent-to-agent transfers; tlsConf (the transport's client
+// side) is used for https:// URLs.
+func newShipClient(tlsConf *tls.Config) *http.Client {
+	return &http.Client{Transport: &http.Transport{
+		DialContext:         (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 15 * time.Second}).DialContext,
+		TLSClientConfig:     tlsConf,
+		TLSHandshakeTimeout: 5 * time.Second,
+		MaxIdleConnsPerHost: 4,
+		WriteBufferSize:     1 << 20,
+		ReadBufferSize:      64 << 10,
+	}}
+}
+
+// stagingClient returns a client shipping to the agent at base under key.
+func (a *Agent) stagingClient(base, key string) *stagingClient {
+	return &stagingClient{base: base, key: key, token: a.token, hc: a.ship}
+}
+
+func (c *stagingClient) client() *http.Client {
+	if c.hc != nil {
+		return c.hc
+	}
+	return shipClient
+}
 
 func (c *stagingClient) do(ctx context.Context, method, path string, body io.Reader) error {
 	return c.doEnc(ctx, method, path, body, "")
@@ -95,7 +118,7 @@ func (c *stagingClient) doEnc(ctx context.Context, method, path string, body io.
 	if encoding != "" {
 		req.Header.Set("Content-Encoding", encoding)
 	}
-	resp, err := shipClient.Do(req)
+	resp, err := c.client().Do(req)
 	if err != nil {
 		return err
 	}
@@ -115,7 +138,7 @@ func (c *stagingClient) stagingFree(ctx context.Context) int64 {
 		return -1
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
-	resp, err := shipClient.Do(req)
+	resp, err := c.client().Do(req)
 	if err != nil {
 		return -1
 	}

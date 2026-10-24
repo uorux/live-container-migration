@@ -18,7 +18,7 @@ type CheckpointRequest struct {
 	ContainerID string `json:"containerID"` // containerd id, without the "containerd://" prefix
 	// Key under which the destination stages the restore (namespace/destination pod/container).
 	DestKey string `json:"destKey"`
-	DestURL string `json:"destURL"` // base URL of the destination agent, e.g. http://10.0.0.2:7790
+	DestURL string `json:"destURL"` // destination agent, e.g. http://10.0.0.2:7790 (https: its TLS transport)
 	// DestPodUID is the parked destination pod's UID: its volumes are warmed through
 	// /var/lib/kubelet/pods/<uid> (see agent/warm.go). Optional.
 	DestPodUID string        `json:"destPodUID,omitempty"`

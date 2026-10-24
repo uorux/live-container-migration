@@ -61,7 +61,8 @@ func main() {
 	skipMem := fs.Bool("skip-memory-check", false, "migrate even if the nodes look short of RAM for the staged images")
 	allowSkew := fs.Bool("allow-version-skew", false, "migrate even if an agent is too old to negotiate with (see docs/operations.md)")
 	lazy := fs.Bool("lazy-restore", false, "experimental: restore with CRIU lazy pages (resume before memory is loaded)")
-	transferNet := fs.String("transfer-network", os.Getenv("LCM_TRANSFER_NETWORK"), "ship checkpoint data over agent addresses in this CIDR (e.g. a LAN) instead of InternalIPs")
+	transferNet := fs.String("transfer-network", os.Getenv("LCM_TRANSFER_NETWORK"), "ship checkpoint data over agent addresses in this CIDR (e.g. a LAN) instead of InternalIPs, encrypted (agents' -tls-listen)")
+	transferPlain := fs.Bool("transfer-plaintext", os.Getenv("LCM_TRANSFER_PLAINTEXT") == "1", "allow unencrypted HTTP on --transfer-network to agents without -tls-listen (otherwise those ship over InternalIPs)")
 	allowManaged := fs.Bool("allow-managed", false, "migrate a pod with GitOps (Flux/Helm) labels; suspend reconciliation first")
 	fs.Parse(rest)
 	if *to == "" && (cmd == "migrate" || cmd == "recover") {
@@ -87,7 +88,7 @@ func main() {
 	start := time.Now()
 	opts := controller.Options{
 		Namespace: *ns, Pod: pod, Container: *ctr, TargetNode: *to,
-		Token: strings.TrimSpace(string(tok)), WaitImage: *waitImage, Relay: *relay, AllowManaged: *allowManaged, TransferNetwork: *transferNet, LazyRestore: *lazy, SkipMemoryCheck: *skipMem, AllowVersionSkew: *allowSkew,
+		Token: strings.TrimSpace(string(tok)), WaitImage: *waitImage, Relay: *relay, AllowManaged: *allowManaged, TransferNetwork: *transferNet, TransferPlaintext: *transferPlain, LazyRestore: *lazy, SkipMemoryCheck: *skipMem, AllowVersionSkew: *allowSkew,
 		PreDump: api.PreDumpPolicy{Max: *preMax, TargetBytes: *preTarget},
 		Log: func(f string, a ...any) {
 			fmt.Fprintf(os.Stderr, "%7.3fs "+f+"\n", append([]any{time.Since(start).Seconds()}, a...)...)
