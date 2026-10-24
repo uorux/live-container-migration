@@ -27,6 +27,24 @@ def nextrow(h=7):
     global y
     y += h
 
+# The homelab's nodes, each with a color: timelines show "which node" as a color band, so a
+# migration or a VIP handoff reads as a color change. A node missing here shows as "other".
+NODES = [("arquitens", "blue"), ("carrack", "orange"), ("munificent", "purple")]
+NODE_MAPPINGS = [{"type": "value", "options": {str(i + 1): {"text": n, "color": c, "index": i} for i, (n, c) in enumerate(NODES)}}]
+
+def by_node(series, by):
+    """Encode which node a 0/1 series is 1 on as 1..len(NODES), one result per `by` group.
+    `series` is a format string with {node} for the node filter."""
+    return " or ".join(f"(max by ({by}) ({series.format(node=n)}) == 1) * {i + 1}" for i, (n, _) in enumerate(NODES))
+
+# lcm_livepod_running is scraped from the agents, whose target `node` label wins over the
+# metric's: the pod's node ends up in exported_node (or in node, if the scrape ever honors labels).
+LIVEPOD_ON = 'lcm_livepod_running{{exported_node="{node}"}} or lcm_livepod_running{{exported_node="", node="{node}"}}'
+# The VIP gateways run on host networking: their series carry pod and a tailnet IP, and
+# kube-state-metrics says which node a pod is on.
+VIP_ON = ('lcm_gateway_vip_active{{namespace="minecraft-gw"}} * on (namespace, pod) group_left(node) '
+          'max by (namespace, pod, node) (kube_pod_info{{namespace="minecraft-gw", node="{node}"}})')
+
 row("Migrations")
 panel("stat", "Migrations (range)", [('sum by (outcome) (increase(lcm_migrations_total[$__range]))', "{{outcome}}")], 0, 6,
       desc="Finished migrations by outcome: success, rolled_back (restored on the source after a failed restore), aborted (source kept running), failed (needs an operator).",
@@ -65,6 +83,11 @@ panel("timeseries", "Traffic", [('sum by (direction) (rate(lcm_gateway_bytes_tot
 panel("timeseries", "Bytes buffered in the gateway", [('sum by (namespace) (lcm_gateway_buffered_bytes)', "{{namespace}}")], 12, 12, unit="bytes",
       desc="Grows during a migration (players keep sending), returns to ~0 after.")
 nextrow()
+panel("timeseries", "Players by ingress", [
+    ('sum(lcm_gateway_players{job="lcm-gateway-vip-admin"})', "router VIP"),
+    ('sum by (gateway) (lcm_gateway_players{job="lcm-gateway"})', "{{gateway}}")], 0, 24,
+    desc="Where players come in: the router's port-forward to the VIP (handed between nodes without dropping them), or a VPS ingress's gateway (a restart of that gateway drops its players).")
+nextrow()
 
 row("Nodes (lcm-agent)")
 panel("stat", "Agents up", [('up{job="lcm-agent"}', "{{instance}}")], 0, 6,
@@ -78,24 +101,40 @@ panel("table", "Node state", [('lcm_fences', "fences"), ('lcm_staged_restores', 
 nextrow()
 
 row("LivePods")
-panel("state-timeline", "LivePod running", [('max by (namespace, livepod) (lcm_livepod_running)', "{{namespace}}/{{livepod}}")], 0, 12,
-      desc="1 while the LivePod's pod is Running (LcmLivePodNotRunning after 10 min at 0).")
-panel("table", "Where each LivePod runs", [('max by (namespace, livepod, node, phase) (lcm_livepod_running)', "")], 12, 12,
+panel("state-timeline", "Where servers run", [(
+    by_node(LIVEPOD_ON, "namespace, livepod")
+    + ' or (max by (namespace, livepod) (lcm_livepod_running{phase=~"Asleep|Sleeping"}) * 0)'
+    + ' or (max by (namespace, livepod) (lcm_livepod_running) * 0 - 1)', "{{livepod}}")], 0, 24, h=9,
+    desc="One row per LivePod, colored by the node its pod runs on: a live migration shows as a color change. Grey: asleep (on-demand, idle). Yellow: starting, stopping or between pods.",
+    fieldConfig={"defaults": {"color": {"mode": "fixed", "fixedColor": "text"}, "mappings": NODE_MAPPINGS + [
+        {"type": "value", "options": {"0": {"text": "asleep", "color": "#5c5c5c", "index": 10}, "-1": {"text": "starting / moving", "color": "yellow", "index": 11}}},
+        {"type": "range", "options": {"from": len(NODES) + 1, "to": 100, "result": {"text": "other node", "color": "red", "index": 12}}}]},
+        "overrides": []},
+    options={"showValue": "auto", "mergeValues": True, "rowHeight": 0.85, "legend": {"showLegend": False}})
+nextrow(9)
+panel("table", "Where each LivePod runs", [
+    ('max by (namespace, livepod, node, phase) (label_replace(lcm_livepod_running, "node", "$1", "exported_node", "(.+)"))', "")], 0, 12,
       desc="Reported by the leading controller.", options={"showHeader": True},
       transformations=[{"id": "labelsToFields"}, {"id": "organize", "options": {"excludeByName": {"Time": True, "Value": True}}}])
-nextrow()
-panel("timeseries", "On-demand wakes", [('sum by (backend, result) (increase(lcm_gateway_wakes_total[$__rate_interval]))', "{{backend}} {{result}}")], 0, 12,
+panel("timeseries", "On-demand wakes", [('sum by (backend, result) (increase(lcm_gateway_wakes_total[$__rate_interval]))', "{{backend}} {{result}}")], 12, 12,
       desc="A player arrived for an asleep server and a gateway asked the agents to start it. Errors: no agent with the LivePod controller reachable, or no on-demand LivePod for that backend.")
-panel("state-timeline", "On-demand LivePods asleep", [('max by (namespace, livepod) (lcm_livepod_running{phase=~"Asleep|Sleeping"} + 1)', "{{namespace}}/{{livepod}}")], 12, 12,
-      desc="Shown while asleep (stopped for idleness) or shutting down to sleep.")
 nextrow()
 panel("timeseries", "Server menu", [('sum by (result) (increase(lcm_gateway_menu_total[$__rate_interval]))', "{{result}}")], 0, 12,
       desc="Players on the menu address (lcm-gateway -menu): shown, then transferred / quit / left / timeout. unsupported = a client older than 1.21.6 (or newer than this lcm knows) got the address list; arrived = a transferred player reached its server.")
 panel("timeseries", "Menu transfers by server", [('sum by (backend) (increase(lcm_gateway_menu_transfers_total[$__rate_interval]))', "{{backend}}")], 12, 12,
       desc="Players the menu sent to each server.")
 nextrow()
-panel("state-timeline", "Router-path VIP: serving gateway", [('max by (instance) (lcm_gateway_vip_active)', "{{instance}}")], 0, 12,
-      desc="Which lcm-gateway -vip instance serves the VIP (1). Exactly one at a time; see docs/router-path.md.")
+panel("state-timeline", "Router-path VIP: serving node", [
+    # No "unserved" fallback: the gateways are scraped a few seconds apart, so every handoff would
+    # flash one. LcmVIPUnserved covers a VIP nobody serves.
+    (by_node(VIP_ON, "namespace"), "VIP"),
+    ('max by (node) (' + VIP_ON.format(node=".+").replace('node=".+"', 'node=~".+"') + ')', "{{node}}")], 0, 12,
+      desc="Top row: the node whose lcm-gateway -vip serves the VIP, as a color (a handoff is a color change). Below: each node's gateway, serving or standby. See docs/router-path.md.",
+      fieldConfig={"defaults": {"color": {"mode": "fixed", "fixedColor": "text"}}, "overrides": [
+          {"matcher": {"id": "byName", "options": "VIP"}, "properties": [{"id": "mappings", "value": NODE_MAPPINGS}]},
+          {"matcher": {"id": "byRegexp", "options": "^(?!VIP$).*"}, "properties": [{"id": "mappings", "value": [
+              {"type": "value", "options": {"1": {"text": "serving", "color": "green", "index": 0}, "0": {"text": "standby", "color": "#5c5c5c", "index": 1}}}]}]}]},
+      options={"showValue": "auto", "mergeValues": True, "rowHeight": 0.85, "legend": {"showLegend": False}})
 panel("timeseries", "VIP handoffs", [('sum by (direction, result) (increase(lcm_gateway_vip_handoffs_total[$__rate_interval]))', "{{direction}} {{result}}"),
                                     ('histogram_quantile(0.9, sum by (le) (rate(lcm_gateway_vip_handoff_seconds_bucket{direction="out"}[$__rate_interval])))', "p90 seconds (out)")], 12, 12,
       desc="Handoffs of the VIP with its players' connections (node drain, gateway upgrade). rolled_back: no standby took it and the old gateway restored everything. The player-visible pause adds the relay's reconnect (~0.1 s).")
