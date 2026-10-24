@@ -22,6 +22,10 @@
               "__meta_kubernetes_pod_label_mc_rooty_dev_pack"
             ],
             "targetLabel": "server"
+          },
+          {
+            "targetLabel": "job",
+            "replacement": "minecraft-mc-exporter"
           }
         ]
       },
@@ -34,6 +38,10 @@
               "__meta_kubernetes_pod_label_mc_rooty_dev_pack"
             ],
             "targetLabel": "server"
+          },
+          {
+            "targetLabel": "job",
+            "replacement": "minecraft-jmx"
           }
         ]
       }
@@ -88,6 +96,18 @@
             "annotations": {
               "summary": "{{ $labels.pod }} can't be scheduled",
               "description": "Usually no node has the memory request free. Players joining it are held, then kicked."
+            }
+          },
+          {
+            "alert": "MinecraftPlayerOnline",
+            "expr": "mc_player_list{job=\"minecraft-mc-exporter\"} > 0",
+            "labels": {
+              "severity": "info",
+              "channel": "discord-mc"
+            },
+            "annotations": {
+              "summary": "Minecraft player online",
+              "description": "{{ $labels.name }} is online on {{ $labels.server }}."
             }
           },
           {

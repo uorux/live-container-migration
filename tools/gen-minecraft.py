@@ -238,15 +238,18 @@ STATIC = {
     ],
     "monitoring.yaml": [
         # Server metrics while a pack is awake (asleep packs have no target; that's not an outage:
-        # lcm_livepod_running{phase} says which). `server` keeps today's Grafana panels working.
+        # lcm_livepod_running{phase} says which). The job and server labels are recusant's
+        # (recusant-minecraft-scrape.yaml), so today's dashboards (modded, Paper, JVM) and the
+        # TPS/heap/GC alerts keep working unchanged.
         {"apiVersion": "monitoring.coreos.com/v1", "kind": "PodMonitor",
          "metadata": {"name": "minecraft", "namespace": "minecraft"},
          "spec": {
              "selector": {"matchLabels": {"app.kubernetes.io/part-of": "minecraft"}},
              "podMetricsEndpoints": [
                  {"port": port, "interval": "30s", "relabelings": [
-                     {"sourceLabels": ["__meta_kubernetes_pod_label_mc_rooty_dev_pack"], "targetLabel": "server"}]}
-                 for port in ("mc-metrics", "jmx")
+                     {"sourceLabels": ["__meta_kubernetes_pod_label_mc_rooty_dev_pack"], "targetLabel": "server"},
+                     {"targetLabel": "job", "replacement": job}]}
+                 for port, job in (("mc-metrics", "minecraft-mc-exporter"), ("jmx", "minecraft-jmx"))
              ]}},
         {"apiVersion": "monitoring.coreos.com/v1", "kind": "PrometheusRule",
          "metadata": {"name": "minecraft-alerts", "namespace": "minecraft", "labels": {"release": "prometheus"}},
@@ -267,6 +270,14 @@ STATIC = {
               "labels": {"severity": "warning"},
               "annotations": {"summary": "{{ $labels.pod }} can't be scheduled",
                               "description": "Usually no node has the memory request free. Players joining it are held, then kicked."}},
+             # Replaces recusant's Discord presence alert, which read Velocity's per-player metric:
+             # the modded servers' exporter lists players (mc_player_list{name,...}). Retire the
+             # recusant rule (recusant-minecraft-alerts.yaml) together with Velocity.
+             {"alert": "MinecraftPlayerOnline",
+              "expr": 'mc_player_list{job="minecraft-mc-exporter"} > 0',
+              "labels": {"severity": "info", "channel": "discord-mc"},
+              "annotations": {"summary": "Minecraft player online",
+                              "description": "{{ $labels.name }} is online on {{ $labels.server }}."}},
              {"alert": "McVolumeFull",
               "expr": 'kubelet_volume_stats_used_bytes{namespace="minecraft"} / kubelet_volume_stats_capacity_bytes{namespace="minecraft"} > 0.85',
               "for": "15m",
