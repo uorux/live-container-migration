@@ -52,9 +52,12 @@ type Options struct {
 	Relay                                 string
 	AllowManaged                          bool // migrate pods carrying GitOps labels (reconciliation suspended)
 	// TransferNetwork (CIDR): ship checkpoint data to an agent address in this network instead
-	// of the node's InternalIP, e.g. a LAN faster than the overlay the InternalIPs are on.
-	TransferNetwork string
-	LazyRestore     bool // experimental: CRIU lazy pages on the destination
+	// of the node's InternalIP, e.g. a LAN faster than the overlay the InternalIPs are on. Only
+	// over the agents' encrypted transport (lcm-agent -tls-listen) unless TransferPlaintext;
+	// without it, data goes over the InternalIPs.
+	TransferNetwork   string
+	TransferPlaintext bool
+	LazyRestore       bool // experimental: CRIU lazy pages on the destination
 	// SkipMemoryCheck skips the pre-flight check that both nodes have the RAM for the staged
 	// images (see checkMemory).
 	SkipMemoryCheck bool
@@ -199,22 +202,14 @@ func Migrate(ctx context.Context, kc kubernetes.Interface, o Options) (*Result, 
 	} else {
 		logf("images present on %s after %s", o.TargetNode, time.Since(t1).Round(time.Millisecond))
 	}
-	shipURL := dstURL
-	if o.TransferNetwork != "" {
-		if u, err := transferURL(ctx, dstURL, o.Token, o.TransferNetwork, port(o)); err != nil {
-			logf("warning: no %s address on %s (%v); shipping over %s", o.TransferNetwork, o.TargetNode, err, dstURL)
-		} else {
-			shipURL = u
-			logf("shipping checkpoint data via %s", shipURL)
-		}
-	}
+	shipTo := shipURL(ctx, o, srcURL, dstURL, o.TargetNode, logf)
 
 	runHook(ctx, srcURL, o.Token, src, PreMigrateAnnotation, ctrID,
 		map[string]string{"LCM_SOURCE_NODE": res.SourceNode, "LCM_TARGET_NODE": o.TargetNode}, logf)
 
 	// 2. Checkpoint on the source, streamed progress.
 	req := api.CheckpointRequest{MigrationID: res.MigrationID, Namespace: o.Namespace, Pod: src.Name,
-		PodUID: string(src.UID), Container: ctrName, ContainerID: ctrID, DestKey: key, DestURL: shipURL, DestPodUID: destUID, PreDump: o.PreDump, Relay: o.Relay, LazyRestore: o.LazyRestore}
+		PodUID: string(src.UID), Container: ctrName, ContainerID: ctrID, DestKey: key, DestURL: shipTo, DestPodUID: destUID, PreDump: o.PreDump, Relay: o.Relay, LazyRestore: o.LazyRestore}
 	ck, err := runCheckpoint(ctx, srcURL, o.Token, req, logf)
 	res.Checkpoint = ck
 	if err != nil {
@@ -457,28 +452,72 @@ func checkMemory(ctx context.Context, token, srcURL, dstURL, ctrID string, logf 
 	return nil
 }
 
-// transferURL asks the agent at agentURL for its addresses and returns one inside cidr.
-func transferURL(ctx context.Context, agentURL, token, cidr string, port int) (string, error) {
+// shipURL is where the agent at fromURL sends checkpoint data for the agent at toURL (on node):
+// toURL's address in o.TransferNetwork when there is a usable one (see transferURL), otherwise
+// toURL itself.
+func shipURL(ctx context.Context, o Options, fromURL, toURL, node string, logf func(string, ...any)) string {
+	if o.TransferNetwork == "" {
+		return toURL
+	}
+	u, err := transferURL(ctx, fromURL, toURL, o.Token, o.TransferNetwork, port(o), o.TransferPlaintext)
+	if err != nil {
+		logf("warning: not shipping over %s to %s (%v); shipping over %s", o.TransferNetwork, node, err, toURL)
+		return toURL
+	}
+	logf("shipping checkpoint data to %s via %s", node, u)
+	return u
+}
+
+// transferURL asks the agent at toURL for its addresses and returns one inside cidr: https on its
+// encrypted transport port, or, if either agent lacks the transport and plaintext is allowed,
+// plain http on port. The answers come over the InternalIPs, so someone on the transfer network
+// can't strip the TLS port from them to force plaintext.
+func transferURL(ctx context.Context, fromURL, toURL, token, cidr string, port int, plaintext bool) (string, error) {
 	pfx, err := netip.ParsePrefix(cidr)
 	if err != nil {
 		return "", err
 	}
-	b, err := agentDo(ctx, agentURL, token, http.MethodGet, "/v1/info", nil)
+	type info struct {
+		Addresses []string `json:"addresses"`
+		TLSPort   int      `json:"tlsPort"`
+	}
+	get := func(url string) (info, error) {
+		var in info
+		b, err := agentDo(ctx, url, token, http.MethodGet, "/v1/info", nil)
+		if err == nil {
+			err = json.Unmarshal(b, &in)
+		}
+		return in, err
+	}
+	to, err := get(toURL)
 	if err != nil {
 		return "", err
 	}
-	var info struct {
-		Addresses []string `json:"addresses"`
+	tlsOK := to.TLSPort > 0 && to.TLSPort < 1<<16
+	if tlsOK {
+		// The sender must speak the transport too: an agent serving it also dials it, one from
+		// before it would fail every handshake.
+		from, err := get(fromURL)
+		if err != nil {
+			return "", err
+		}
+		tlsOK = from.TLSPort > 0
 	}
-	if err := json.Unmarshal(b, &info); err != nil {
-		return "", err
-	}
-	for _, a := range info.Addresses {
-		if ip, err := netip.ParseAddr(a); err == nil && pfx.Contains(ip) {
+	for _, a := range to.Addresses {
+		ip, err := netip.ParseAddr(a)
+		if err != nil || !pfx.Contains(ip) {
+			continue
+		}
+		switch {
+		case tlsOK:
+			return fmt.Sprintf("https://%s", netip.AddrPortFrom(ip, uint16(to.TLSPort))), nil
+		case plaintext:
 			return fmt.Sprintf("http://%s", netip.AddrPortFrom(ip, uint16(port))), nil
+		default:
+			return "", fmt.Errorf("the agents don't both serve the encrypted transport (lcm-agent -tls-listen) and --transfer-plaintext is not set")
 		}
 	}
-	return "", fmt.Errorf("agent has no address in %s (has %v)", cidr, info.Addresses)
+	return "", fmt.Errorf("agent has no address in %s (has %v)", cidr, to.Addresses)
 }
 
 // restoredOK reports whether lcm-runc's last restore attempt for key succeeded. Call it after
@@ -547,13 +586,23 @@ func rollback(ctx context.Context, kc kubernetes.Interface, o Options, src *core
 	}); err != nil {
 		return nil, fmt.Errorf("rollback pod never parked: %w", err)
 	}
-	fwdURL := srcURL
-	if srcURL == dstURL {
-		fwdURL = "" // same node: the agent moves the staging instead of copying it
+	fwdURL := "" // same node: the agent moves the staging instead of copying it
+	if srcURL != dstURL {
+		fwdURL = shipURL(ctx, o, dstURL, srcURL, res.SourceNode, logf)
 	}
-	body, _ := json.Marshal(map[string]string{"destURL": fwdURL, "destKey": rbKey})
+	forward := func(to string) error {
+		body, _ := json.Marshal(map[string]string{"destURL": to, "destKey": rbKey})
+		_, err := agentDo(ctx, dstURL, o.Token, http.MethodPost, "/v1/stage/"+key+"/forward", bytes.NewReader(body))
+		return err
+	}
 	t0 := time.Now()
-	if _, err := agentDo(ctx, dstURL, o.Token, http.MethodPost, "/v1/stage/"+key+"/forward", bytes.NewReader(body)); err != nil {
+	err := forward(fwdURL)
+	if err != nil && fwdURL != "" && fwdURL != srcURL {
+		// The workload is down: don't let the transfer network be what keeps it down.
+		logf("warning: forwarding via %s failed (%v); retrying over %s", fwdURL, err, srcURL)
+		err = forward(srcURL)
+	}
+	if err != nil {
 		return nil, fmt.Errorf("forwarding images back to %s: %w", res.SourceNode, err)
 	}
 	logf("images forwarded back to %s in %s", res.SourceNode, time.Since(t0).Round(time.Millisecond))

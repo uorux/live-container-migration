@@ -1,6 +1,6 @@
 // lcm-agent is the per-node live-migration daemon. See internal/agent for the HTTP API.
 //
-//	lcm-agent serve [-listen :7790] [-token-file F] [-bin-dir DIR]
+//	lcm-agent serve [-listen :7790] [-tls-listen :7791] [-token-file F] [-bin-dir DIR]
 package main
 
 import (
@@ -35,6 +35,7 @@ func main() {
 	}
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	listen := fs.String("listen", fmt.Sprintf(":%d", api.DefaultPort), "listen address")
+	tlsListen := fs.String("tls-listen", os.Getenv("LCM_TLS_LISTEN"), "also serve the API over TLS keyed from the token (the encrypted transport for --transfer-network), e.g. :7791")
 	tokenFile := fs.String("token-file", os.Getenv("LCM_TOKEN_FILE"), "file holding the shared bearer token")
 	vlogs := fs.String("victorialogs-url", os.Getenv("LCM_VICTORIALOGS_URL"), "ship logs (agent + lcm-runc) to this VictoriaLogs base URL")
 	livePods := fs.Bool("livepods", os.Getenv("LCM_LIVEPODS") == "1", "run the LivePod controller (leader-elected across agents)")
@@ -113,6 +114,19 @@ func main() {
 	go a.FollowRestores(context.Background())
 	// Give the listener a moment, then finish or abort checkpoints a previous process left behind.
 	go func() { time.Sleep(time.Second); a.Recover(context.Background()) }()
+	if *tlsListen != "" {
+		ln, err := net.Listen("tcp", *tlsListen)
+		if err != nil {
+			log.Error("tls-listen", "err", err)
+			os.Exit(1)
+		}
+		tsrv := &http.Server{Handler: a.Handler(), ReadHeaderTimeout: 10 * time.Second}
+		log.Info("lcm-agent listening (TLS)", "addr", *tlsListen)
+		go func() {
+			log.Error("serve TLS", "err", tsrv.Serve(a.TLSListener(ln)))
+			os.Exit(1)
+		}()
+	}
 	srv := &http.Server{Addr: *listen, Handler: a.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	log.Info("lcm-agent listening", "addr", *listen, "state", stage.Root(), "version", agent.Version)
 	if err := srv.ListenAndServe(); err != nil {

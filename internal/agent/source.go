@@ -59,7 +59,7 @@ func (a *Agent) checkpoint(ctx context.Context, req api.CheckpointRequest, emit 
 	if err := writeJSON(filepath.Join(dir, "request.json"), persisted{Request: req, Upper: upper, Pid: st.Pid}); err != nil {
 		return nil, err
 	}
-	dst := &stagingClient{base: req.DestURL, key: req.DestKey, token: a.token}
+	dst := a.stagingClient(req.DestURL, req.DestKey)
 	if err := dst.reset(ctx); err != nil {
 		return nil, fmt.Errorf("destination agent: %w", err)
 	}
@@ -335,7 +335,7 @@ func (a *Agent) checkpoint(ctx context.Context, req api.CheckpointRequest, emit 
 // state exists only in dir plus what the destination already has. It is also how an agent that
 // restarted mid-migration completes it (see Recover). Transient failures are retried.
 func (a *Agent) finish(ctx context.Context, req api.CheckpointRequest, dir, upper string, res *api.CheckpointResult, emit func(api.Event)) (*api.CheckpointResult, error) {
-	dst := &stagingClient{base: req.DestURL, key: req.DestKey, token: a.token}
+	dst := a.stagingClient(req.DestURL, req.DestKey)
 	t0 := time.Now()
 	diffPath := filepath.Join(dir, "rootfs-diff.tar")
 	if err := captureRootfs(upper, diffPath); err != nil {

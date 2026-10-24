@@ -1,7 +1,8 @@
 // Package agent implements lcm-agent, the per-node daemon (a host systemd service on NixOS) that
 // checkpoints containers on the source node and stages their images on the destination node.
 //
-// HTTP API (all JSON; mutating calls need "Authorization: Bearer <token>"):
+// HTTP API (all JSON; mutating calls need "Authorization: Bearer <token>"). It is served in plain
+// HTTP and, with -tls-listen, also over the encrypted agent transport (see transport.go):
 //
 //	POST   /v1/checkpoint                 source: run a migration, streams NDJSON api.Event lines
 //	PUT    /v1/stage/{key}/dir/{name}     destination: body is a tar of an image dir, unpacked as {name}/
@@ -23,7 +24,7 @@
 //	POST   /v1/report                     lcm CLI: a finished migration's outcome (metrics + history)
 //	GET    /v1/migrations[?n=50]          migration history reported to this agent
 //	POST   /v1/pull                       pull images ({"images": [...]}) into containerd ahead of a restore
-//	GET    /v1/info                       this node's addresses (for picking a transfer network)
+//	GET    /v1/info                       this node's addresses and TLS port (for picking a transfer network)
 //	GET    /v1/relay?container=ID         player connections carried by the container's lcm-relay
 //	POST   /v1/wake/{backend}             wake the on-demand LivePod(s) for a gateway backend
 //	                                      (agent token, or the wake-only token)
@@ -51,6 +52,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -65,6 +67,10 @@ type Agent struct {
 	token  string
 	binDir string // where lcm-relay etc. live, served at /v1/bin/{name}
 	log    *slog.Logger
+	tr     *transport   // token-derived TLS identity (transport.go)
+	ship   *http.Client // to other agents: plain for http:// bases, the transport for https://
+	// tlsPort is the encrypted transport's port, 0 without -tls-listen.
+	tlsPort atomic.Int32
 
 	mu         sync.Mutex
 	migrations map[string]bool          // in-flight checkpoints, by container id
@@ -83,6 +89,8 @@ type checkpointSt struct {
 
 func New(token, binDir string, log *slog.Logger) *Agent {
 	a := &Agent{token: token, binDir: binDir, log: log, migrations: map[string]bool{}, status: map[string]*checkpointSt{}}
+	a.tr = newTransport(token)
+	a.ship = newShipClient(a.tr.clientConfig())
 	a.tm = newTelemetry(a)
 	return a
 }
@@ -299,6 +307,9 @@ func (a *Agent) handleInfo(w http.ResponseWriter, r *http.Request) {
 	}
 	info := map[string]any{"addresses": addrs, "version": Version, "encodings": []string{"zstd"},
 		"memAvailable": memAvailable(), "memTotal": memTotal(), "stagingFree": stagingFree()}
+	if p := a.tlsPort.Load(); p > 0 {
+		info["tlsPort"] = p
+	}
 	if id := r.URL.Query().Get("container"); id != "" {
 		if !stage.ValidName(id) {
 			http.Error(w, "bad container id", http.StatusBadRequest)
@@ -459,7 +470,7 @@ func (a *Agent) handleForward(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := context.WithoutCancel(r.Context())
-	dst := &stagingClient{base: req.DestURL, key: req.DestKey, token: a.token}
+	dst := a.stagingClient(req.DestURL, req.DestKey)
 	if err := dst.reset(ctx); err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
