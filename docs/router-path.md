@@ -66,6 +66,14 @@ or the gateway is upgraded. Players see a pause of about 0.1 s; nobody is discon
 | Active gateway frozen (SIGSTOP) 20 s | standby took the VIP after 9 s; the old one stepped down when resumed; new connections fine |
 | Kernel-level move between two VIP namespaces (unit test, `unshare -rn`) | 27-57 ms, 10/10, bytes in flight intact |
 
+## Production results (2026-10-24, bettermc with 3 players connected through the VIP)
+
+| Scenario | Result |
+|---|---|
+| `POST /vip/handoff` (arquitens -> carrack) | 119 ms for the call; the same 3 streams on the new holder, offsets still advancing; relay outage 44 ms; no disconnects |
+| `kubectl rollout restart ds/lcm-gateway-vip` (the SIGTERM path a drain takes) | the serving gateway handed its 3 players over in 5 ms; the relay reconnected 5 times as the pods cycled (10-123 ms each, always the same session); rollout done in ~35 s; no disconnects |
+| Handoff fired 0.2 s after a bettermc migration froze (relay quiesced, session parked) | migration finished (12.7 s blackout); on resume the relay reattached its session to the new holder with all 3 streams (`resumed=true`, no new session); no disconnects |
+
 ## Deploying it
 
 - **Manifest:** `lab/manifests/gateway-vip.yaml` (DaemonSet, ServiceAccount + Role for leases
