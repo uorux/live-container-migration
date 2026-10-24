@@ -439,7 +439,11 @@ So locality saves at most one stage and a third of the bytes. It can't make writ
           enabled: true
           crushLocationLabels: [kubernetes.io/hostname]   # Rook names CRUSH host buckets after the node
     ```
-  - Applies to new mounts only (pod restart or migration).
+  - Applies when a node stages the volume afresh: a migration to another node does, but a pod restarting
+    where the volume is still staged keeps the old mount options (it takes an unstage, i.e. no pod on that node
+    using the volume for a moment). Proposed in uorux/homelab#403 (verified to propagate through Rook 1.20.9's
+    CephConnection and ceph-csi-operator 1.0.4 to ceph-csi 3.16.3; Rook turns it off on Ceph 20.2.0, which isn't
+    deployed).
   - Saves 100 % of read network traffic and one RTT plus transfer per read miss. Reads come in at the OSD's local
     speed (hundreds of MB/s) instead of tailnet speed, which helps chunk loading, backups, restic/velero reads and
     lcm's shared-file warm-up.
@@ -449,8 +453,8 @@ So locality saves at most one stage and a third of the bytes. It can't make writ
 Separate from the network: Minecraft world saves are dominated by sync writes. Vanilla, Forge/NeoForge and Fabric
 default to `sync-chunk-writes=true` in server.properties, which makes every chunk write a synchronous Ceph round trip
 (2 network hops + a 4–8 ms commit). Paper disables it by default; verify for each server type. Setting it to `false`
-for the modded and Fabric servers turns a save into buffered writes plus a final flush, probably the single biggest
-fix for "stalls during world saves". The trade-off is losing un-flushed chunks if the node crashes. The 4–8 ms OSD
+for the modded and Fabric servers turns a save into buffered writes plus a final flush. Measured (see the top): a
+1024-chunk `save-all flush` on Fabric took 25.3 s with `true` and 3.5 s with `false`, and Paper didn't care. The trade-off is losing un-flushed chunks if the node crashes. The 4–8 ms OSD
 commit on PLP SSDs is also high (crosvm virtio-blk plus LUKS). Once the network is fixed, it becomes the next floor.
 
 ## 4. Measure these first (in this order, all read-only or test-scoped)
