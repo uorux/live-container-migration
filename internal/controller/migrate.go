@@ -13,6 +13,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -129,6 +130,11 @@ func Migrate(ctx context.Context, kc kubernetes.Interface, o Options) (*Result, 
 			return nil, err
 		}
 	}
+	if short, err := checkRequests(ctx, kc, src, o.TargetNode); err != nil {
+		logf("warning: skipping the resource-request check: %v", err)
+	} else if short != "" {
+		return nil, errors.New(short)
+	}
 
 	res := &Result{MigrationID: time.Now().UTC().Format("20060102-150405") + "-" + rand.String(5),
 		SourcePod: src.Name, SourceNode: src.Spec.NodeName, DestPod: nextName(src.Name), DestNode: o.TargetNode}
@@ -156,6 +162,9 @@ func Migrate(ctx context.Context, kc kubernetes.Interface, o Options) (*Result, 
 	}
 	t0 := time.Now()
 	if err := waitPod(ctx, kc, o.Namespace, res.DestPod, 3*time.Minute, func(p *corev1.Pod) (bool, error) {
+		if err := refused(p); err != nil {
+			return false, err
+		}
 		for _, s := range p.Status.InitContainerStatuses {
 			if s.Name == WaitInitName && s.State.Running != nil {
 				return true, nil
@@ -523,6 +532,9 @@ func rollback(ctx context.Context, kc kubernetes.Interface, o Options, src *core
 		return nil, fmt.Errorf("creating rollback pod: %w", err)
 	}
 	if err := waitPod(ctx, kc, o.Namespace, rb.DestPod, 3*time.Minute, func(p *corev1.Pod) (bool, error) {
+		if err := refused(p); err != nil {
+			return false, err
+		}
 		for _, s := range p.Status.InitContainerStatuses {
 			if s.Name == WaitInitName && s.State.Running != nil {
 				return true, nil

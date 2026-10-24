@@ -190,3 +190,27 @@ func waitUntil(t *testing.T, what string, cond func() bool) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+// A gateway that stops serving without a handoff drops its relays; they reconnect.
+func TestDropTunnels(t *testing.T) {
+	gw := New(Config{Tunnel: testTunnelCfg(), Logger: testLogger(), Backend: "default"})
+	tl, _ := Listen(context.Background(), "127.0.0.1:0")
+	go gw.ServeTunnel(tl)
+	defer tl.Close()
+	srv := echoServer(t)
+	r := relay.New(relay.Config{Gateway: tl.Addr().String(), Backend: "default", Upstream: srv, Tunnel: testTunnelCfg(),
+		BackoffMin: 20 * time.Millisecond, BackoffMax: 100 * time.Millisecond, Logger: testLogger()})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { r.Run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+	e := &mcEnv{t: t, gw: gw}
+	e.waitFor("relay connected", func() bool { return gw.DefaultBackend().Session().Connected() })
+	if n := gw.DropTunnels(); n != 1 {
+		t.Fatalf("dropped %d relay connections, want 1", n)
+	}
+	e.waitFor("relay reconnected", func() bool {
+		return scrape(t, gw)[`lcm_gateway_tunnel_connects_total{backend="default",kind="resume"}`] >= 1 &&
+			gw.DefaultBackend().Session().Connected()
+	})
+}

@@ -84,6 +84,7 @@ type Gateway struct {
 	metrics  *gwMetrics
 
 	tunnelForward atomic.Pointer[string] // see ForwardTunnels
+	tunnels       sync.Map               // relay connections being served: net.Conn -> struct{}
 
 	cookieMu    sync.Mutex
 	usedCookies map[string]time.Time // menu cookie nonces already redeemed
@@ -367,6 +368,20 @@ func (g *Gateway) ForwardTunnels(addr string) {
 	g.tunnelForward.Store(&addr)
 }
 
+// DropTunnels closes every relay connection this gateway serves, so the relays reconnect, and,
+// through ForwardTunnels, reach whichever gateway serves now. A VIP gateway that loses its lease
+// without handing off calls it: otherwise its relays stay with it, and players arriving at the
+// new holder wait for servers that never connect there. It returns how many it closed.
+func (g *Gateway) DropTunnels() int {
+	n := 0
+	g.tunnels.Range(func(k, _ any) bool {
+		k.(net.Conn).Close()
+		n++
+		return true
+	})
+	return n
+}
+
 // RefuseTunnels is the ForwardTunnels address that refuses relays.
 const RefuseTunnels = "refuse"
 
@@ -385,6 +400,8 @@ func forwardTunnel(c net.Conn, addr string, log *slog.Logger) {
 }
 
 func (g *Gateway) handleTunnel(nc net.Conn) {
+	g.tunnels.Store(nc, struct{}{})
+	defer g.tunnels.Delete(nc)
 	conn, err := tunnel.ServerHandshake(nc, g.cfg.Tunnel.Token, g.cfg.Tunnel.HandshakeTimeout, g.lookup)
 	if err != nil {
 		g.log.Warn("tunnel handshake failed", "remote", nc.RemoteAddr().String(), "err", err)

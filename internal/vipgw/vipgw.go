@@ -388,6 +388,11 @@ func (c *Controller) stepDownLocked(why string) {
 	}
 	c.active.Store(false)
 	c.cfg.Gateway.ForwardTunnels(gateway.RefuseTunnels) // until the next tick finds the new holder
+	// No handoff happened, so the relays' sessions stay here unless they reconnect: drop them,
+	// and their reconnects reach the new holder (forwarded once a tick knows it).
+	if n := c.cfg.Gateway.DropTunnels(); n > 0 {
+		c.log.Info("dropped relay connections; they reconnect to the gateway serving the VIP", "relays", n)
+	}
 	if err := c.cfg.NS.Down(); err != nil {
 		c.log.Error("taking the VIP down failed", "err", err)
 	}
