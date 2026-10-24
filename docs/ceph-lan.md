@@ -22,12 +22,53 @@
 >
 >   With `true`, vanilla fsyncs every region-file write, and a synced write costs ~8 ms here. The
 >   modded packs inherited `true` (the default) from recusant's local disks. Setting it to `false` in
->   each pack's `server.properties` is the cheapest Ceph fix there is. The tradeoff: a node crash can
->   lose the last few seconds of chunk writes. Writes still reach Ceph (3 replicas) within the page
->   cache writeback, and a saved world is consistent once the server has flushed.
+>   each pack's `server.properties` is the cheapest Ceph fix there is.
+>
+>   The tradeoff, from the 1.21.10 bytecode (`RegionFile`): `true` opens region files with `O_DSYNC`.
+>   A chunk save writes the data to fresh sectors, then the header that points at them, then frees the
+>   old sectors. `O_DSYNC` is what keeps those writes in that order on disk. With `false` they sit in
+>   the node's page cache, which can write them back in any order. Losing that cache can therefore
+>   leave a header pointing at sectors that never got written or now hold another chunk. The server
+>   logs it and regenerates the chunk from the seed, so builds in that chunk are lost: that's
+>   corruption of individual chunks, not of the whole world.
+>   - Losing the cache means a node crash or power loss, or the MDS evicting the node's CephFS client.
+>     A JVM crash, an OOM kill, a pod kill or a migration loses nothing: the page cache outlives the
+>     process, and CephFS flushes dirty pages before another node opens the file.
+>   - Only chunks written in roughly the last 30 s (writeback expiry) are at risk.
+>   - A clean stop and `save-all flush` still fsync.
+>   - Even with `true`, chunk, entity and POI files aren't crash-consistent with each other. Velero
+>     backs up every world volume.
 > - lcm's own transfers can already go over the LAN encrypted: `lcm-agent -tls-listen :7791` plus
 >   `lcm migrate --transfer-network 10.0.0.0/24` (TLS 1.3 keyed from the agent token; see
 >   docs/operations.md), tested in the lab. That needs tcp/7791 open on the LAN interface.
+>
+> **Measured 2026-10-24, afternoon (arquitens -> munificent, 20 s runs, all test state removed):**
+>
+> | path | 1 stream | 4 streams | notes |
+> |---|---|---|---|
+> | plain LAN TCP | 251 MB/s | 250 MB/s | 2.5GbE macvtap |
+> | TLS 1.3 over plain LAN | 267 MB/s | 262 MB/s | Python ssl, AES-256-GCM: line rate |
+> | tailnet (tailscaled) | 139 MB/s | 133 MB/s | |
+> | kernel WireGuard over LAN | 109 MB/s | 116 MB/s | in a netns, MTU 1420, 218/1325 retransmits |
+> | **pod network** (host -> pod on another node) | **40 MB/s** | 42 MB/s | Cilium VXLAN inside the tailnet, pod MTU 1230; 32 MB/s reversed |
+>
+> `rados bench` from the toolbox (pod network, size-3 pool, quiet cluster, OSD commit latency
+> 2-3 ms): 4 MiB writes 14.7 MB/s with 1 in flight (271 ms each) and 26 MB/s with 16 (avg 2.3 s,
+> max 9.9 s); 4 MiB reads 40 / 63 MB/s; 4 KiB writes 142 IOPS (7 ms).
+>
+> What this changes:
+> - **The bottleneck is the pod network, not the tailnet or the disks.**
+>   - VXLAN packets reach tailscale0 as individual UDP datagrams. They lose the TCP segmentation
+>     offload that lets host TCP over the tailnet run at 139 MB/s, so Ceph gets ~40 MB/s.
+>   - Every Ceph hop is pod to pod (client -> primary OSD -> replicas), and a 4 MiB write costs
+>     ~12 MiB on that path, which matches the 271 ms.
+> - **(d1) is out.** Kernel WireGuard is slower than tailscaled here. Any tunnel that sends
+>   ~1.4 KB packets through the crosvm virtio path hits the same packets-per-second limit.
+> - **Encryption over plain TCP runs at LAN line rate**, because 64 KB segments go through virtio.
+>   That is (b), Ceph msgr2 secure on host networking over the LAN: roughly 6x today's Ceph path.
+> - **A smaller alternative:** Ceph on host networking over the tailnet IPs. It needs no msgr2
+>   secure (tailscaled already encrypts) and no LAN firewall change, gets ~139 MB/s (3.5x), but
+>   still needs the same mon IP migration as (b).
 
 # Ceph (and live migration) onto the LAN, encrypted: options and a staged plan
 
