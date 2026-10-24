@@ -283,7 +283,7 @@
     "storageClassName": "ceph-filesystem",
     "resources": {
       "requests": {
-        "storage": "30Gi"
+        "storage": "150Gi"
       }
     }
   }

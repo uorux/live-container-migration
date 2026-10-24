@@ -37,7 +37,7 @@ PACKS = [
     ("dungeonheroes",  5,  6,  15, "backend.json", "ops-global.json", False),
     ("integratedmc",  10, 11,  20, "backend.json", "ops-global.json", True),
     ("abyssalascent", 10, 11,  20, "backend.json", "ops-global.json", True),
-    ("sdfs",           7,  8,  30, "global.json",  "ops-global.json", False),
+    ("sdfs",           7,  8, 150, "global.json",  "ops-global.json", False),
 ]
 
 # Menu display names (from the image agent); the gateways take them as -label / LCM_LABELS, printed
