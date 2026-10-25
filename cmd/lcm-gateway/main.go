@@ -22,6 +22,7 @@ import (
 
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/util/connrotation"
 
 	"lcm/internal/cliutil"
 	"lcm/internal/gateway"
@@ -295,6 +296,11 @@ func startVIP(g *gateway.Gateway, log *slog.Logger, tok []byte, listen, tunnelLi
 	if err != nil {
 		return nil, nil, fmt.Errorf("kubernetes client: %w", err)
 	}
+	// The lease is renewed through connections the controller can close: one to
+	// an API server whose node went down otherwise hangs every renewal until
+	// client-go's health check notices, and the VIP is let go meanwhile.
+	dialer := connrotation.NewDialer((&net.Dialer{Timeout: 2 * time.Second, KeepAlive: 10 * time.Second}).DialContext)
+	rc.Dial = dialer.DialContext
 	kc, err := kubernetes.NewForConfig(rc)
 	if err != nil {
 		return nil, nil, err
@@ -308,6 +314,7 @@ func startVIP(g *gateway.Gateway, log *slog.Logger, tok []byte, listen, tunnelLi
 		return nil, nil, err
 	}
 	ctrl := vipgw.New(vipgw.Config{Gateway: g, NS: ns, Token: tok, Kube: kc, Namespace: podNS, Identity: pod,
-		Lease: lease, Selector: peers, HandoffPort: handoffPort, TunnelPort: tport, ActiveLabel: label, Logger: log})
+		Lease: lease, Selector: peers, HandoffPort: handoffPort, TunnelPort: tport, ActiveLabel: label,
+		ResetConns: dialer.CloseAll, Logger: log})
 	return ctrl, pl, nil
 }

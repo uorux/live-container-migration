@@ -2,6 +2,8 @@ package vipgw
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -11,8 +13,12 @@ import (
 	"time"
 
 	coordv1 "k8s.io/api/coordination/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 
 	"lcm/internal/gateway"
 	"lcm/internal/wire"
@@ -118,5 +124,122 @@ func TestStandbyNotServing(t *testing.T) {
 	c.mu.Unlock()
 	if c.Serving() {
 		t.Fatal("a standby serves")
+	}
+}
+
+// failGets makes the first n lease reads fail the way a request on a
+// connection to a vanished API server does: no answer before the deadline.
+func failGets(kc *fake.Clientset, n int) *atomic.Int32 {
+	var calls atomic.Int32
+	kc.PrependReactor("get", "leases", func(k8stesting.Action) (bool, runtime.Object, error) {
+		if calls.Add(1) <= int32(n) {
+			return true, nil, fmt.Errorf("Get \"https://10.43.0.1:443/...\": %w", context.DeadlineExceeded)
+		}
+		return false, nil, nil
+	})
+	return &calls
+}
+
+func countResets(c *Controller) *atomic.Int32 {
+	var n atomic.Int32
+	c.cfg.ResetConns = func() { n.Add(1) }
+	c.cfg.APITimeout = 100 * time.Millisecond
+	return &n
+}
+
+func leaseHolder(t *testing.T, kc *fake.Clientset) string {
+	t.Helper()
+	l, err := kc.CoordinationV1().Leases(testNS).Get(context.Background(), testLease, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return holder(l)
+}
+
+// Renewals that get no answer (an API server's node went down under the
+// connection) are retried on fresh connections within the tick: the lease is
+// renewed and the VIP kept, as long as one API server answers.
+func TestRenewReconnectsWithinTick(t *testing.T) {
+	c, ns, kc := newActive(t, "me", 6*time.Second) // a tick away from letting go
+	resets := countResets(c)
+	failGets(kc, 2)
+	c.tick(context.Background())
+	if !c.Active() || ns.downs.Load() != 0 {
+		t.Fatal("stepped down although a retry could renew")
+	}
+	if !c.leaseFresh() {
+		t.Fatal("lease not renewed")
+	}
+	if resets.Load() != 2 {
+		t.Fatalf("%d connection resets, want 2 (one per unanswered attempt)", resets.Load())
+	}
+}
+
+// With no API server answering at all, the gateway still lets go of the VIP
+// before another may take it.
+func TestRenewNoAnswerStepsDown(t *testing.T) {
+	c, ns, kc := newActive(t, "me", 7*time.Second)
+	countResets(c)
+	failGets(kc, 1<<20)
+	c.tick(context.Background())
+	if c.Active() || ns.downs.Load() != 1 {
+		t.Fatal("kept the VIP without renewing the lease past 2/3 of its duration")
+	}
+}
+
+// An attempt that hangs is cut off at APITimeout, so the retry fits the tick.
+func TestAPIAttemptsBoundsAHang(t *testing.T) {
+	c, _, _ := newActive(t, "me", 0)
+	resets := countResets(c)
+	var calls int
+	start := time.Now()
+	err := c.apiAttempts(context.Background(), func(ctx context.Context) error {
+		if calls++; calls == 1 {
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return nil
+	})
+	if err != nil || calls != 2 || resets.Load() != 1 {
+		t.Fatalf("err %v, %d calls, %d resets: want a second attempt after a reset", err, calls, resets.Load())
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("took %v: the hanging attempt wasn't cut off", d)
+	}
+}
+
+// An answer from the API server (a conflict, say) is the caller's to handle:
+// not retried, connections kept.
+func TestAPIAttemptsAnswerNotRetried(t *testing.T) {
+	c, _, _ := newActive(t, "me", 0)
+	resets := countResets(c)
+	var calls int
+	conflict := apierrors.NewConflict(schema.GroupResource{Group: "coordination.k8s.io", Resource: "leases"}, testLease, errors.New("modified"))
+	err := c.apiAttempts(context.Background(), func(context.Context) error { calls++; return conflict })
+	if !apierrors.IsConflict(err) || calls != 1 || resets.Load() != 0 {
+		t.Fatalf("err %v, %d calls, %d resets: want the conflict back at once", err, calls, resets.Load())
+	}
+}
+
+// Right after a handoff in, the lease still names the gateway it came from
+// until takeOver rewrites it. A tick meanwhile takes it over rather than
+// reading it as lost; without a pending handoff it is lost.
+func TestRenewDuringTakeOver(t *testing.T) {
+	c, ns, kc := newActive(t, "old", time.Second)
+	c.mu.Lock()
+	c.takingOverFrom = "old"
+	c.mu.Unlock()
+	c.tick(context.Background())
+	if !c.Active() || ns.downs.Load() != 0 {
+		t.Fatal("stepped down over the lease it is taking over")
+	}
+	if h := leaseHolder(t, kc); h != "me" {
+		t.Fatalf("lease holder %q, want me", h)
+	}
+
+	c2, ns2, _ := newActive(t, "old", time.Second)
+	c2.tick(context.Background())
+	if c2.Active() || ns2.downs.Load() != 1 {
+		t.Fatal("kept the VIP with the lease held by another gateway and no handoff pending")
 	}
 }

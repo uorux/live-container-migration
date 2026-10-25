@@ -46,6 +46,13 @@ or the gateway is upgraded. Players see a pause of about 0.1 s; nobody is discon
     are lost.
   - **Partitioned active gateway:** if it can't renew for 2/3 of the lease, it takes its VIP
     down before anyone else may take it.
+  - **An API server going away** (its node rebooting; every node runs one): a renewal on a
+    connection to it hangs, and client-go would keep using that connection until its HTTP/2
+    health check gives up, ~30 s later. Each lease call is therefore bounded (1 s) and, if it
+    got no answer, the gateway closes its API connections and retries on new ones, which reach
+    a surviving API server. Before this, a node reboot dropped the router-path players 7 s
+    after a clean handoff (2026-10-25). Right after a handoff in, a renewal that still finds
+    the old gateway's name on the lease takes it over instead of reading it as lost.
   - **Hung but not crashed (e.g. SIGSTOP):** it keeps answering ARP until it runs again. Then,
     before serving any connection (connections queued in the kernel meanwhile are accepted at
     once), it checks that its last lease renewal is under 2/3 of the lease old (monotonic or

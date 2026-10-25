@@ -75,7 +75,14 @@ type Config struct {
 
 	LeaseDuration time.Duration // default 10s
 	RenewInterval time.Duration // default 2s
-	Logger        *slog.Logger
+	// APITimeout bounds one attempt at a lease call (default 1s); a tick makes
+	// as many as fit in RenewInterval.
+	APITimeout time.Duration
+	// ResetConns closes the client's connections to the API server (a
+	// connrotation dialer's CloseAll), so the next request dials afresh. Nil:
+	// attempts are retried on the same connections.
+	ResetConns func()
+	Logger     *slog.Logger
 }
 
 // Controller decides when this gateway serves the VIP.
@@ -94,6 +101,10 @@ type Controller struct {
 	// gateway for a moment; it must not take that as its own until then.
 	handedTo string
 	cooldown time.Time
+	// takingOverFrom is the gateway a handoff in came from while the lease
+	// still names it (takeOver hasn't rewritten it yet): renewing takes the
+	// lease over instead of stepping down. Guarded by mu.
+	takingOverFrom string
 
 	handoffs   *metrics.Counter
 	handoffDur *metrics.Histogram
@@ -117,6 +128,9 @@ func New(cfg Config) *Controller {
 	}
 	if cfg.RenewInterval <= 0 {
 		cfg.RenewInterval = 2 * time.Second
+	}
+	if cfg.APITimeout <= 0 {
+		cfg.APITimeout = time.Second
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
@@ -195,7 +209,7 @@ func (c *Controller) Serving() bool {
 	age := c.renewAge().Round(time.Millisecond)
 	ctx, cancel := context.WithTimeout(context.Background(), c.cfg.RenewInterval)
 	defer cancel()
-	if err := c.renew(ctx); err != nil {
+	if err := c.apiAttempts(ctx, c.renew); err != nil {
 		if errors.Is(err, errLost) {
 			c.stepDownLocked(fmt.Sprintf("lease taken by another gateway (last renewed %v ago)", age))
 		} else {
@@ -261,7 +275,7 @@ func (c *Controller) tick(ctx context.Context) {
 	rctx, cancel := context.WithTimeout(ctx, c.cfg.RenewInterval)
 	defer cancel()
 	if c.active.Load() {
-		err := c.renew(rctx)
+		err := c.apiAttempts(rctx, c.renew)
 		switch {
 		case err == nil:
 			c.setRenewed(time.Now())
@@ -280,7 +294,12 @@ func (c *Controller) tick(ctx context.Context) {
 		c.forwardTo(rctx, c.handedTo)
 		return
 	}
-	ok, h, err := c.tryAcquire(rctx)
+	var ok bool
+	var h string
+	err := c.apiAttempts(rctx, func(ctx context.Context) (err error) {
+		ok, h, err = c.tryAcquire(ctx)
+		return err
+	})
 	switch {
 	case err != nil:
 		c.log.Debug("lease not acquired", "err", err)
@@ -361,12 +380,43 @@ func (c *Controller) renew(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if holder(l) != c.cfg.Identity {
+	// Right after a handoff in, the lease still names the gateway it came from
+	// until takeOver rewrites it: that's this gateway's lease, not a lost one.
+	if h := holder(l); h != c.cfg.Identity && (h == "" || h != c.takingOverFrom) {
 		return errLost
 	}
 	c.claim(l, time.Now())
 	_, err = c.leases().Update(ctx, l, metav1.UpdateOptions{})
 	return err
+}
+
+// apiAttempts runs a lease call until it succeeds, the API server answers
+// (errLost, a conflict, ...), or ctx is done, each attempt bounded by
+// APITimeout. A request can hang on a connection to an API server that just
+// went away (its node rebooting): client-go keeps using that connection until
+// its HTTP/2 health check gives up, half a minute later, long after the lease
+// would have to be let go. So after an attempt that got no answer the
+// connections are closed (ResetConns), and the next attempt dials afresh and
+// reaches one of the API servers still up.
+func (c *Controller) apiAttempts(ctx context.Context, f func(context.Context) error) error {
+	for {
+		actx, cancel := context.WithTimeout(ctx, c.cfg.APITimeout)
+		err := f(actx)
+		cancel()
+		var answer apierrors.APIStatus
+		if err == nil || errors.Is(err, errLost) || errors.As(err, &answer) || ctx.Err() != nil {
+			return err
+		}
+		if c.cfg.ResetConns != nil {
+			c.cfg.ResetConns()
+			c.log.Info("no answer from the API server; reconnecting", "err", err)
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(50 * time.Millisecond): // a refused dial fails at once
+		}
+	}
 }
 
 // tryAcquire takes the lease if nobody holds it, it has expired, or it
@@ -393,24 +443,39 @@ func (c *Controller) tryAcquire(ctx context.Context) (bool, string, error) {
 }
 
 // takeOver points the lease at this gateway after a handoff from `from`.
+// The caller has set takingOverFrom; it is cleared here once that's done.
 func (c *Controller) takeOver(from string) {
+	defer func() {
+		c.mu.Lock()
+		if c.takingOverFrom == from {
+			c.takingOverFrom = ""
+		}
+		c.mu.Unlock()
+	}()
 	for i := 0; i < 20; i++ {
+		var third string
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		l, err := c.leases().Get(ctx, c.cfg.Lease, metav1.GetOptions{})
-		if err == nil {
-			h := holder(l)
-			if h != c.cfg.Identity && h != from && h != "" && !c.expired(l, time.Now()) {
-				cancel()
-				c.log.Error("lease held by a third gateway after a handoff; stepping down", "holder", h)
-				c.mu.Lock()
-				c.stepDownLocked("lease held by " + h)
-				c.mu.Unlock()
-				return
+		err := c.apiAttempts(ctx, func(ctx context.Context) error {
+			l, err := c.leases().Get(ctx, c.cfg.Lease, metav1.GetOptions{})
+			if err != nil {
+				return err
+			}
+			if h := holder(l); h != c.cfg.Identity && h != from && h != "" && !c.expired(l, time.Now()) {
+				third = h
+				return nil
 			}
 			c.claim(l, time.Now())
 			_, err = c.leases().Update(ctx, l, metav1.UpdateOptions{})
-		}
+			return err
+		})
 		cancel()
+		if third != "" {
+			c.log.Error("lease held by a third gateway after a handoff; stepping down", "holder", third)
+			c.mu.Lock()
+			c.stepDownLocked("lease held by " + third)
+			c.mu.Unlock()
+			return
+		}
 		if err == nil {
 			c.setRenewed(time.Now())
 			return
@@ -752,6 +817,7 @@ func (c *Controller) serveHandoff(conn net.Conn) {
 	probeAll(conns)
 	c.setRenewed(time.Now())
 	c.active.Store(true)
+	c.takingOverFrom = string(from) // until takeOver has the lease
 	c.stats.HandoffsIn++
 	c.stats.LastHandoff = "in from " + string(from)
 	c.stats.LastPlayers = restored
