@@ -120,6 +120,16 @@ by the 2 of 3 Traefik pods on other nodes: ~65% of public HTTPS hung for 10 s (H
 log-ingest route's `sourceRange` had the same list. Fix: add the nodes' tailnet IPs wherever a
 `cilium_host` address is trusted. Check for this after any routing change.
 
+The second half of the same outage: **tailscaled's own sockets.** tailscaled marks its own
+connections with the bypass bit (0x80000), and Tailscale's rule 5210 sends those to the main table.
+Under native routing the other nodes' pod CIDRs exist only in table 52, so a bypass-marked
+connection to a remote pod left through the LAN's default route and was lost
+(`ip route get <remote pod> mark 0x80000` showed `via 10.0.0.1`). `tailscale serve` (svc:k8s)
+dials Traefik's ClusterIP from such a socket, so it only ever reached the node-local Traefik pod.
+With the trust list fixed, the public path still failed ~65%; adding
+`ip rule add priority 5205 fwmark 0x80000/0xff0000 to 10.42.0.0/16 lookup 52` on the nodes made it
+20/20 (nixos-dots `fix/tailscaled-pod-route`, in the cilium-tailscale-mark-rules unit).
+
 Production specifics the lab doesn't cover:
 - tailscaled's own ACL filtering of subnet traffic, which step 1 handles.
 - Tailscale's netfilter chains. With `--snat-subnet-routes=false` they add no masquerade.
