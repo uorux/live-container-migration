@@ -110,6 +110,16 @@ anything else that forces a full endpoint regeneration with a live agent restart
 6. **Rollback:** the same helm command with `--set routingMode=tunnel --set tunnelProtocol=vxlan`,
    then the simultaneous agent restart. The Tailscale routes can stay.
 
+**What native routing changed that the lab didn't catch (2026-10-24, found ~4 h after go-live):**
+host traffic to a pod on *another* node now leaves through `tailscale0` with the node's tailnet IP
+as its source (`ip route get <remote pod>` shows `src 100.x`), where VXLAN used the node's
+`cilium_host` address. Anything that allowlists or trusts the `cilium_host` addresses breaks for
+those connections. Traefik's `proxyProtocol.trustedIPs` listed only them, so HAProxy's PROXY v2
+header from the VPS ingresses (through `tailscale serve` on the node holding svc:k8s) was refused
+by the 2 of 3 Traefik pods on other nodes: ~65% of public HTTPS hung for 10 s (HAProxy `SD`). The
+log-ingest route's `sourceRange` had the same list. Fix: add the nodes' tailnet IPs wherever a
+`cilium_host` address is trusted. Check for this after any routing change.
+
 Production specifics the lab doesn't cover:
 - tailscaled's own ACL filtering of subnet traffic, which step 1 handles.
 - Tailscale's netfilter chains. With `--snat-subnet-routes=false` they add no masquerade.
